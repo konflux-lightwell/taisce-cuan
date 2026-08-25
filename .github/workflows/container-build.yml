@@ -1,0 +1,67 @@
+name: Container Build
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  REGISTRY: quay.io
+  REGISTRY_PROJECT: light-castle
+  IMAGE_NAME: taisce-cuan
+
+jobs:
+  build:
+    name: Build and Push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine image tags
+        id: tag
+        run: |
+          short_sha="$(git rev-parse --short HEAD)"
+          tags=("$short_sha")
+
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            tags+=("${{ github.ref_name }}")
+          elif [[ "${{ github.ref_name }}" == "main" ]]; then
+            tags+=("latest")
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            safe_ref="${{ github.head_ref }}"
+            safe_ref="${safe_ref//\//-}"
+            tags+=("pr-${{ github.event.pull_request.number }}-${safe_ref}")
+            echo "extra_label=quay.expires-after=5d" >> "$GITHUB_OUTPUT"
+          else
+            tags+=("testing")
+          fi
+
+          echo "tags=${tags[*]}" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        id: build
+        uses: redhat-actions/buildah-build@v2
+        with:
+          image: ${{ env.REGISTRY_PROJECT }}/${{ env.IMAGE_NAME }}
+          tags: ${{ steps.tag.outputs.tags }}
+          containerfiles: ./Dockerfile
+          build-args: |
+            GIT_COMMIT_SHA=${{ github.sha }}
+          labels: ${{ steps.tag.outputs.extra_label }}
+
+      - name: Push to registry
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: redhat-actions/push-to-registry@v2
+        with:
+          image: ${{ steps.build.outputs.image }}
+          tags: ${{ steps.build.outputs.tags }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.CONTAINER_REGISTRY_USER }}
+          password: ${{ secrets.CONTAINER_REGISTRY_PASSWORD }}
