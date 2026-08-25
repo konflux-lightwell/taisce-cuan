@@ -1,0 +1,56 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: push-source-to-lightwell-builds
+  labels:
+    app.kubernetes.io/name: push-source-to-lightwell-builds
+    app.kubernetes.io/part-of: lightwell
+spec:
+  description: |-
+    Unpacks an sdist archive, records SLSA Build Provenance metadata (.lightwell/metadata.json),
+    commits, tags <canonical-pkg>/<version>, and pushes to lightwell-builds.
+  params:
+    - name: sdistPath
+      description: Path to the sdist tarball (.tar.gz) on the workspace.
+      type: string
+    - name: packageName
+      description: Package name (e.g., sniffio).
+      type: string
+    - name: packageVersion
+      description: Package version (e.g., 1.3.1).
+      type: string
+    - name: gitSecretName
+      description: Name of the basic-auth secret containing GitLab credentials.
+      type: string
+      default: lightwell-builds-git-auth
+    - name: gitlabUrl
+      description: GitLab base URL.
+      type: string
+      default: https://gitlab.cee.redhat.com
+    - name: gitlabGroup
+      description: GitLab target group.
+      type: string
+      default: lightwell/lightwell-builds
+  workspaces:
+    - name: workspace
+      description: Workspace holding the source files and workspace workdir.
+  steps:
+    - name: push-source
+      image: quay.io/redhat-user-workloads/lightwell-python-tenant/taisce-cuan:latest
+      env:
+        - name: HOME
+          value: /tekton/home
+        - name: GITLAB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: $(params.gitSecretName)
+              key: password
+      command: ["taisce-cuan", "push"]
+      args:
+        - "--sdist=$(params.sdistPath)"
+        - "--package=$(params.packageName)"
+        - "--version=$(params.packageVersion)"
+        - "--workspace-dir=$(workspaces.workspace.path)/work"
+        - "--gitlab-url=$(params.gitlabUrl)"
+        - "--group=$(params.gitlabGroup)"
+        - "--auth-token=$(GITLAB_TOKEN)"
