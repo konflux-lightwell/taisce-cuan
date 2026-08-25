@@ -1,0 +1,47 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: fetch-source
+  labels:
+    app.kubernetes.io/name: fetch-source
+    app.kubernetes.io/part-of: lightwell
+spec:
+  description: |-
+    Resolves and downloads an sdist from RHTL (PEP 691) or PyPI, verifying its SHA-256 digest.
+  params:
+    - name: packageName
+      description: Package name (e.g. sniffio).
+      type: string
+    - name: packageVersion
+      description: Package version (e.g. 1.3.1).
+      type: string
+    - name: rhtlOnly
+      description: Fail if package not found in RHTL.
+      type: string
+      default: "false"
+  workspaces:
+    - name: sdists
+      description: Workspace directory where the downloaded sdist will be placed.
+  results:
+    - name: sdistPath
+      description: Relative path of the downloaded sdist file.
+  steps:
+    - name: fetch-sdist
+      image: quay.io/redhat-user-workloads/lightwell-python-tenant/taisce-cuan:latest
+      env:
+        - name: HOME
+          value: /tekton/home
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        EXTRA_FLAGS=""
+        if [ "$(params.rhtlOnly)" = "true" ]; then
+          EXTRA_FLAGS="--rhtl-only"
+        fi
+        
+        taisce-cuan fetch "$(params.packageName)" "$(params.packageVersion)" \
+          --output-dir "$(workspaces.sdists.path)" \
+          $EXTRA_FLAGS
+          
+        CANONICAL=$(python3 -c "import re, sys; print(re.sub(r'[-_.]+', '-', sys.argv[1]).lower())" "$(params.packageName)")
+        echo -n "$(workspaces.sdists.path)/${CANONICAL}-$(params.packageVersion).tar.gz" > "$(results.sdistPath.path)"

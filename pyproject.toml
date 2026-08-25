@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "taisce-cuan"
+version = "0.1.0"
+description = "Lightwell Python source distribution ingestion and repository preservation tool"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "Red Hat Lightwell Team" }
+]
+dependencies = [
+    "httpx>=0.27.0",
+    "pydantic>=2.7.0",
+]
+
+[project.scripts]
+taisce-cuan = "taisce_cuan.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/taisce_cuan"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
