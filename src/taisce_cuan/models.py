@@ -16,8 +16,26 @@ limitations under the License.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, ConfigDict, Field
+
+
+def get_builder_id() -> str:
+    """Resolve builder ID pinned to commit ref or container image digest if available."""
+    # 1. Explicit builder ID / image digest env var (injected in container build or Tekton step)
+    builder_id = os.getenv("TAISCE_CUAN_BUILDER_ID")
+    if builder_id and builder_id.strip():
+        return builder_id.strip()
+
+    # 2. Git commit SHA injected at build time
+    commit_sha = os.getenv("GIT_COMMIT_SHA") or os.getenv("GITHUB_SHA") or os.getenv("CI_COMMIT_SHA")
+    if commit_sha and commit_sha.strip():
+        return f"https://github.com/konflux-lightwell/taisce-cuan@{commit_sha.strip()}"
+
+    # 3. Fallback to package version tag
+    from taisce_cuan import __version__
+    return f"https://github.com/konflux-lightwell/taisce-cuan@v{__version__}"
 
 
 class Digest(BaseModel):
@@ -63,7 +81,7 @@ class RunDetailsMetadata(BaseModel):
 
 
 class Builder(BaseModel):
-    id: str = "https://github.com/konflux-lightwell/taisce-cuan@v0.1.0"
+    id: str = Field(default_factory=get_builder_id)
 
 
 class RunDetails(BaseModel):

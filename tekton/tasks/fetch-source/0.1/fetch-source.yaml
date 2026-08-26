@@ -27,7 +27,7 @@ spec:
       description: Relative path of the downloaded sdist file.
   steps:
     - name: fetch-sdist
-      image: quay.io/redhat-user-workloads/lightwell-python-tenant/taisce-cuan:latest
+      image: quay.io/light-castle/taisce-cuan:latest
       env:
         - name: HOME
           value: /tekton/home
