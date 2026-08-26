@@ -17,7 +17,7 @@ limitations under the License.
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Digest(BaseModel):
@@ -45,7 +45,7 @@ class ResolvedDependency(BaseModel):
 
 
 class BuildDefinition(BaseModel):
-    buildType: str = "https://lightwell.example.com/buildTypes/sdist-ingest/v1"
+    buildType: str = "https://lightwell.dev/buildTypes/python-source-ingest/v1"
     externalParameters: ExternalParameters
     resolvedDependencies: List[ResolvedDependency] = Field(default_factory=list)
 
@@ -63,7 +63,7 @@ class RunDetailsMetadata(BaseModel):
 
 
 class Builder(BaseModel):
-    id: str = "https://lightwell.example.com/builders/taisce-cuan/v1"
+    id: str = "https://github.com/konflux-lightwell/taisce-cuan@v0.1.0"
 
 
 class RunDetails(BaseModel):
@@ -86,6 +86,8 @@ class FromagerInfo(BaseModel):
 
 
 class IngestionMetadata(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     schema_version: str = "1"
     attestation_level: str = "unsigned-inventory"
     note: str = (
@@ -98,6 +100,3 @@ class IngestionMetadata(BaseModel):
     predicate: Predicate
     lightwell_builds: LightwellBuildsInfo
     fromager: FromagerInfo = Field(default_factory=FromagerInfo)
-
-    class Config:
-        populate_by_name = True
