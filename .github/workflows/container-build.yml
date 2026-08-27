@@ -6,9 +6,6 @@ on:
       - main
     tags:
       - "*"
-  pull_request:
-    branches:
-      - main
   workflow_dispatch:
 
 env:
@@ -34,11 +31,6 @@ jobs:
             tags+=("${{ github.ref_name }}")
           elif [[ "${{ github.ref_name }}" == "main" ]]; then
             tags+=("latest")
-          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            safe_ref="${{ github.head_ref }}"
-            safe_ref="${safe_ref//\//-}"
-            tags+=("pr-${{ github.event.pull_request.number }}-${safe_ref}")
-            echo "extra_label=quay.expires-after=5d" >> "$GITHUB_OUTPUT"
           else
             tags+=("testing")
           fi
