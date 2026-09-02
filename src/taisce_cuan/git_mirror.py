@@ -67,11 +67,8 @@ class GitMirrorPublisher:
         committer_name: str = "taisce-cuan bot",
         committer_email: str = "lightwell@redhat.com",
         remote_url: Optional[str] = None,
-        gitlab_url: Optional[str] = None,
     ):
-        base_url = (gitlab_url or forge_url).rstrip("/")
-        self.forge_url = base_url
-        self.gitlab_url = base_url
+        self.forge_url = forge_url.rstrip("/")
         self.group = group.strip("/")
         self.auth_token = auth_token
         self.username = username
@@ -129,9 +126,6 @@ class GitMirrorPublisher:
 
         return f"{self.forge_url}/{self.group}/{repo_name}.git"
 
-    def ensure_gitlab_project(self, repo_name: str) -> str:
-        return self.ensure_remote_project(repo_name)
-
     def get_existing_tags(self, repo_dir: Path, canonical: str) -> List[Tuple[Version, str]]:
         """List and parse existing tags matching <canonical>/<version>."""
         res = subprocess.run(
@@ -182,16 +176,19 @@ class GitMirrorPublisher:
         output_provenance_file: Path,
     ) -> Optional[Path]:
         """Create a signed attestation via cosign if signing key is provided (fail-closed)."""
-        if not sign_key or not sign_key.strip():
+        key_str = (sign_key or "").strip()
+        if not key_str:
             logger.debug("No sign_key provided to sign_attestation; skipping")
             return None
 
-        key_str = sign_key.strip()
-        is_kms = any(key_str.startswith(prefix) for prefix in ["awskms://", "k8s://", "gcpkms://", "azurekms://", "vault://"])
+        is_kms = any(
+            key_str.startswith(prefix)
+            for prefix in ["awskms://", "k8s://", "gcpkms://", "azurekms://", "vault://"]
+        )
         if not is_kms:
             key_path = Path(key_str)
-            if not key_path.exists():
-                raise ValueError(f"Signing key file '{key_str}' does not exist.")
+            if not key_path.exists() or not key_path.is_file():
+                raise ValueError(f"Signing key file '{key_str}' does not exist or is not a file.")
 
         cosign_bin = shutil.which("cosign")
         if not cosign_bin:
