@@ -22,6 +22,7 @@ import logging
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import urllib.parse
@@ -32,7 +33,6 @@ from packaging.version import InvalidVersion, Version
 from taisce_cuan.models import (
     BuildDefinition,
     Builder,
-    Digest,
     ExternalParameters,
     FromagerInfo,
     IngestionMetadata,
@@ -102,7 +102,7 @@ class GitMirrorPublisher:
         encoded_project = urllib.parse.quote(f"{self.group}/{repo_name}", safe="")
 
         try:
-            with httpx.Client(timeout=15.0, verify=False) as client:
+            with httpx.Client(timeout=15.0, verify=True) as client:
                 resp = client.get(f"{self.forge_url}/api/v4/projects/{encoded_project}", headers=headers)
                 if resp.status_code == 200:
                     logger.info(f"Forge repository {self.group}/{repo_name} exists")
@@ -176,55 +176,53 @@ class GitMirrorPublisher:
 
     def sign_attestation(
         self,
-        metadata_file: Path,
+        metadata: IngestionMetadata,
         source_file: Path,
         sign_key: Optional[str],
         output_provenance_file: Path,
     ) -> Optional[Path]:
-        """Optionally create a signed attestation / signature via cosign if signing key is provided."""
+        """Create a signed attestation via cosign if signing key is provided (fail-closed)."""
         if not sign_key or not sign_key.strip():
             logger.debug("No sign_key provided to sign_attestation; skipping")
             return None
 
-        # Check if signing key is a file path and verify existence
-        if (
-            sign_key.startswith("/")
-            or sign_key.startswith("./")
-            or sign_key.startswith("../")
-            or sign_key.endswith(".key")
-            or sign_key.endswith(".pem")
-        ):
-            if not Path(sign_key).exists():
-                logger.warning(f"Signing key file '{sign_key}' does not exist; skipping attestation signing")
-                return None
+        key_str = sign_key.strip()
+        is_kms = any(key_str.startswith(prefix) for prefix in ["awskms://", "k8s://", "gcpkms://", "azurekms://", "vault://"])
+        if not is_kms:
+            key_path = Path(key_str)
+            if not key_path.exists():
+                raise ValueError(f"Signing key file '{key_str}' does not exist.")
 
         cosign_bin = shutil.which("cosign")
         if not cosign_bin:
-            logger.warning("Signing key was provided but cosign binary is not installed in PATH; skipping attestation signing")
-            return None
+            raise RuntimeError("Signing key provided but 'cosign' CLI binary is not installed in PATH.")
 
         output_provenance_file.parent.mkdir(parents=True, exist_ok=True)
-        cmd = [
-            cosign_bin,
-            "attest-blob",
-            str(source_file),
-            f"--predicate={metadata_file}",
-            "--type=https://slsa.dev/provenance/v1",
-            f"--key={sign_key}",
-            "--yes",
-            "--tlog-upload=false",
-            f"--output-file={output_provenance_file}",
-        ]
+
+        with tempfile.NamedTemporaryFile("w", suffix="-predicate.json", delete=False) as pred_tmp:
+            pred_tmp.write(metadata.predicate.model_dump_json(by_alias=True, exclude_none=True))
+            pred_tmp_path = pred_tmp.name
+
         try:
+            cmd = [
+                cosign_bin,
+                "attest-blob",
+                str(source_file),
+                f"--predicate={pred_tmp_path}",
+                "--type=https://slsa.dev/provenance/v1",
+                f"--key={key_str}",
+                "--yes",
+                "--tlog-upload=false",
+                f"--output-file={output_provenance_file}",
+            ]
             res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if res.returncode == 0 and output_provenance_file.exists():
-                logger.info(f"Successfully created signed attestation ({output_provenance_file})")
-                return output_provenance_file
-            else:
-                logger.warning(f"cosign attest-blob failed: {res.stderr}")
-        except Exception as e:
-            logger.warning(f"Error executing cosign signing: {e}")
-        return None
+            if res.returncode != 0 or not output_provenance_file.exists():
+                raise RuntimeError(f"cosign attest-blob failed (exit {res.returncode}): {res.stderr}")
+            logger.info(f"Successfully created signed attestation ({output_provenance_file})")
+            return output_provenance_file
+        finally:
+            if os.path.exists(pred_tmp_path):
+                os.unlink(pred_tmp_path)
 
     def publish_source(
         self,
@@ -258,6 +256,20 @@ class GitMirrorPublisher:
             subprocess.run(["git", "config", "user.name", self.committer_name], cwd=repo_dir, check=True)
             subprocess.run(["git", "config", "user.email", self.committer_email], cwd=repo_dir, check=True)
 
+        # Configure Git forge credentials safely via config rather than netloc URL
+        if self.auth_token:
+            header = f"PRIVATE-TOKEN: {self.auth_token}" if "gitlab" in self.forge_url.lower() else f"Authorization: Bearer {self.auth_token}"
+            subprocess.run(["git", "config", "http.extraHeader", header], cwd=repo_dir, check=True)
+
+        remote_url = self.ensure_remote_project(repo_name) if not dry_run else None
+
+        # Fetch remote tags and refs if remote is accessible
+        if remote_url and not dry_run:
+            try:
+                subprocess.run(["git", "fetch", "--tags", remote_url], cwd=repo_dir, capture_output=True, check=False)
+            except Exception as e:
+                logger.debug(f"Could not pre-fetch remote tags: {e}")
+
         # Check existing tags
         existing_tags = self.get_existing_tags(repo_dir, canonical)
         existing_tag_names = [t[1] for t in existing_tags]
@@ -287,12 +299,19 @@ class GitMirrorPublisher:
                     pass
             else:
                 predecessors = [t for t in existing_tags if t[0] < target_ver]
-                major_minor_stream = f"stream/{target_ver.major}.{target_ver.minor}"
+                stream_epoch = f"{target_ver.epoch}!" if target_ver.epoch else ""
+                major_minor_stream = f"stream/{stream_epoch}{target_ver.major}.{target_ver.minor}"
 
-                if predecessors:
+                # Check if stream branch already exists
+                existing_branches = subprocess.check_output(["git", "branch", "--list", major_minor_stream], cwd=repo_dir, text=True).strip()
+
+                if existing_branches:
+                    logger.info(f"Checking out existing stream branch {major_minor_stream}")
+                    subprocess.run(["git", "checkout", major_minor_stream], cwd=repo_dir, check=True)
+                elif predecessors:
                     nearest_ver, nearest_tag = predecessors[-1]
                     logger.info(f"Backfill detected: branching {major_minor_stream} from predecessor {nearest_tag}")
-                    subprocess.run(["git", "checkout", "-B", major_minor_stream, nearest_tag], cwd=repo_dir, check=True)
+                    subprocess.run(["git", "checkout", "-b", major_minor_stream, nearest_tag], cwd=repo_dir, check=True)
                 else:
                     logger.info(f"Backfill detected with no predecessor: creating orphan stream {major_minor_stream}")
                     subprocess.run(["git", "checkout", "--orphan", major_minor_stream], cwd=repo_dir, check=True)
@@ -314,8 +333,8 @@ class GitMirrorPublisher:
         now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         subjects = [
-            Subject(name=f"{canonical}-{version}.tar.gz", digest=Digest(sha256=source_sha256)),
-            Subject(name="source/", digest=Digest(gitTree="pending")),
+            Subject(name=f"{canonical}-{version}.tar.gz", digest={"sha256": source_sha256}),
+            Subject(name="source/", digest={"gitTree": "pending"}),
         ]
 
         resolved_deps: List[ResolvedDependency] = []
@@ -341,18 +360,21 @@ class GitMirrorPublisher:
                 ),
                 runDetails=RunDetails(
                     builder=Builder(),
-                    metadata=RunDetailsMetadata(startedOn=now_str, finishedOn=now_str),
+                    metadata=RunDetailsMetadata(
+                        startedOn=now_str,
+                        finishedOn=now_str,
+                        lightwell_builds=LightwellBuildsInfo(
+                            repo=repo_name,
+                            source_registry_used=source_registry,
+                        ),
+                        fromager=FromagerInfo(),
+                    ),
                 ),
             ),
-            lightwell_builds=LightwellBuildsInfo(
-                repo=repo_name,
-                source_registry_used=source_registry,
-            ),
-            fromager=FromagerInfo(),
         )
 
         with open(metadata_file, "w") as f:
-            f.write(metadata.model_dump_json(by_alias=True, indent=2))
+            f.write(metadata.model_dump_json(by_alias=True, exclude_none=True, indent=2))
 
         # Git stage and commit initial state
         subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
@@ -370,9 +392,9 @@ class GitMirrorPublisher:
         git_tree_sha = tree_res.stdout.split()[2] if len(tree_res.stdout.split()) >= 3 else ""
 
         if git_tree_sha:
-            metadata.subject[1].digest.gitTree = git_tree_sha
+            metadata.subject[1].digest = {"gitTree": git_tree_sha}
             with open(metadata_file, "w") as f:
-                f.write(metadata.model_dump_json(by_alias=True, indent=2))
+                f.write(metadata.model_dump_json(by_alias=True, exclude_none=True, indent=2))
             subprocess.run(["git", "add", str(metadata_file)], cwd=repo_dir, check=True)
 
         # Optional Ingestion Signing
@@ -380,7 +402,7 @@ class GitMirrorPublisher:
             logger.info("Signing key provided; generating signed attestation")
             target_att_file = provenance_path or (lightwell_dir / "provenance.json")
             self.sign_attestation(
-                metadata_file=metadata_file,
+                metadata=metadata,
                 source_file=source_path,
                 sign_key=sign_key,
                 output_provenance_file=target_att_file,
@@ -397,25 +419,21 @@ class GitMirrorPublisher:
         subprocess.run(["git", "tag", *tag_flag, tag_name], cwd=repo_dir, check=True)
         logger.info(f"Tagged {tag_name} (gitTree: {git_tree_sha}) on branch {target_branch}")
 
-        if dry_run:
+        if dry_run or not remote_url:
             logger.info("Dry-run requested; skipping git push")
             return tag_name
 
-        # Remote URL & Authentication
-        remote_url = self.ensure_remote_project(repo_name)
-
-        if self.auth_token:
-            parsed = urllib.parse.urlparse(remote_url)
-            auth_netloc = f"{self.username}:{self.auth_token}@{parsed.netloc}"
-            push_url = urllib.parse.urlunparse(parsed._replace(netloc=auth_netloc))
-        else:
-            push_url = remote_url
-
-        push_cmd = ["git", "push", push_url, target_branch, tag_name]
+        push_cmd = ["git", "push", "--atomic", remote_url, target_branch, tag_name]
         if allow_overwrite:
             push_cmd.insert(2, "-f")
 
-        subprocess.run(push_cmd, cwd=repo_dir, check=True)
+        try:
+            subprocess.run(push_cmd, cwd=repo_dir, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as e:
+            # Sanitize error message to avoid any potential auth leakage
+            sanitized_err = e.stderr.replace(self.auth_token, "********") if self.auth_token else e.stderr
+            raise RuntimeError(f"Failed to push branch {target_branch} and tag {tag_name}: {sanitized_err}") from None
+
         logger.info(f"Pushed {repo_name} branch {target_branch} and tag {tag_name} to remote")
         return tag_name
 

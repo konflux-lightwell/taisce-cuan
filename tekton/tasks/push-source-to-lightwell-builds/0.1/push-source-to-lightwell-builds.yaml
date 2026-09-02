@@ -1,17 +1,35 @@
+---
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
   name: push-source-to-lightwell-builds
   labels:
     app.kubernetes.io/name: push-source-to-lightwell-builds
+    app.kubernetes.io/version: "0.1"
     app.kubernetes.io/part-of: lightwell
 spec:
   description: |-
     Unpacks a source archive, records SLSA Build Provenance metadata (.lightwell/metadata.json),
     commits, tags <canonical-pkg>/<version>, and pushes to a Git forge with SemVer topology.
   params:
+    - name: sourceDataArtifact
+      description: Trusted Artifact containing the source archives.
+      type: string
+      default: ""
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data is stored.
+      type: string
+      default: /var/workdir
+    - name: filesDir
+      description: The relative path within dataDir where files are located.
+      type: string
+      default: files
     - name: sourcePath
-      description: Path to the source archive (.tar.gz) on the workspace.
+      description: Explicit path to the source archive (.tar.gz) on the workspace.
       type: string
       default: ""
     - name: sdistPath
@@ -64,20 +82,86 @@ spec:
       description: Name of the basic-auth secret containing Git forge credentials.
       type: string
       default: lightwell-builds-git-auth
-  workspaces:
-    - name: workspace
-      description: Workspace holding the source files and workspace workdir.
+    - name: taskGitUrl
+      type: string
+      description: URL to git repo containing stepactions.
+      default: https://github.com/konflux-ci/release-service-catalog.git
+    - name: taskGitRevision
+      type: string
+      description: Revision in taskGitUrl repo.
+      default: production
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: git-secret
+      secret:
+        secretName: $(params.gitSecretName)
+        optional: true
+    - name: signing-secret
+      secret:
+        secretName: $(params.signingSecretName)
+        optional: true
+  stepTemplate:
+    securityContext:
+      runAsUser: 1001
+    env:
+      - name: HOME
+        value: /tekton/home
+    volumeMounts:
+      - name: workdir
+        mountPath: /var/workdir
+      - name: git-secret
+        mountPath: "/etc/git-secret"
+        readOnly: true
+      - name: signing-secret
+        mountPath: "/etc/signing-secret"
+        readOnly: true
   steps:
+    - name: prepare-workdir
+      image: >-
+        quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      computeResources:
+        limits:
+          memory: 32Mi
+          cpu: 10m
+        requests:
+          memory: 32Mi
+          cpu: 10m
+      command:
+        - mkdir
+        - -p
+        - $(params.dataDir)
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+          cpu: 10m
+        requests:
+          memory: 64Mi
+          cpu: 10m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
     - name: push-source
       image: quay.io/light-castle/taisce-cuan:latest
-      env:
-        - name: HOME
-          value: /tekton/home
-        - name: GIT_AUTH_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: $(params.gitSecretName)
-              key: password
+      computeResources:
+        limits:
+          memory: 256Mi
+          cpu: 200m
+        requests:
+          memory: 128Mi
+          cpu: 50m
       script: |
         #!/usr/bin/env bash
         set -euo pipefail
@@ -85,6 +169,14 @@ spec:
         SOURCE_PATH="$(params.sourcePath)"
         if [ -z "${SOURCE_PATH}" ]; then
           SOURCE_PATH="$(params.sdistPath)"
+        fi
+
+        if [ -z "${SOURCE_PATH}" ] && [ -d "$(params.dataDir)/$(params.filesDir)" ]; then
+          # Auto-discover matching sdist archive in filesDir
+          FOUND_SDIST=$(find "$(params.dataDir)/$(params.filesDir)" -maxdepth 1 -name "*.tar.gz" | head -n 1)
+          if [ -n "${FOUND_SDIST}" ]; then
+            SOURCE_PATH="${FOUND_SDIST}"
+          fi
         fi
 
         FORGE_URL="$(params.gitForgeUrl)"
@@ -105,14 +197,21 @@ spec:
           exit 1
         fi
 
+        GIT_AUTH_TOKEN=""
+        if [ -f "/etc/git-secret/password" ]; then
+          GIT_AUTH_TOKEN=$(< /etc/git-secret/password)
+        elif [ -f "/etc/git-secret/token" ]; then
+          GIT_AUTH_TOKEN=$(< /etc/git-secret/token)
+        fi
+        export GIT_AUTH_TOKEN
+
         ARGS=(
           "--source=${SOURCE_PATH}"
           "--package=$(params.packageName)"
           "--version=$(params.packageVersion)"
-          "--workspace-dir=$(workspaces.workspace.path)/work"
+          "--workspace-dir=$(params.dataDir)/work"
           "--forge-url=${FORGE_URL}"
           "--group=${GROUP}"
-          "--auth-token=${GIT_AUTH_TOKEN}"
           "--committer-name=${COMMITTER_NAME}"
           "--committer-email=${COMMITTER_EMAIL}"
         )
@@ -125,8 +224,10 @@ spec:
           ARGS+=("--allow-overwrite")
         fi
 
-        if [ -n "$(params.signingSecretName)" ] && [ -f "/etc/secrets/SIGN_KEY" ]; then
-          ARGS+=("--sign-key=$(cat /etc/secrets/SIGN_KEY)")
+        if [ -f "/etc/signing-secret/key.pem" ]; then
+          ARGS+=("--sign-key=/etc/signing-secret/key.pem")
+        elif [ -f "/etc/signing-secret/cosign.key" ]; then
+          ARGS+=("--sign-key=/etc/signing-secret/cosign.key")
         fi
 
         taisce-cuan push "${ARGS[@]}"

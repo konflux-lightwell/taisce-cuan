@@ -5,6 +5,16 @@ from pathlib import Path
 import pytest
 
 from taisce_cuan.git_mirror import GitMirrorPublisher
+from taisce_cuan.models import (
+    BuildDefinition,
+    Builder,
+    ExternalParameters,
+    IngestionMetadata,
+    Predicate,
+    RunDetails,
+    RunDetailsMetadata,
+    Subject,
+)
 
 
 def create_sample_source(path: Path, pkg_name: str, version: str, filename: str = "", extra_content: str = "") -> Path:
@@ -194,7 +204,7 @@ def test_semver_branch_topology_backfill(tmp_path: Path):
     assert parent_count == 0
 
 
-def test_sign_attestation_protection_when_key_empty_or_missing(tmp_path: Path):
+def test_sign_attestation_fail_closed(tmp_path: Path):
     source_file = create_sample_source(tmp_path, "sign-test", "1.0.0")
     workspace = tmp_path / "workspace"
     publisher = GitMirrorPublisher(
@@ -204,15 +214,30 @@ def test_sign_attestation_protection_when_key_empty_or_missing(tmp_path: Path):
         committer_email="bot@example.com",
     )
 
+    metadata = IngestionMetadata(
+        subject=[Subject(name="sign-test-1.0.0.tar.gz", digest={"sha256": "abcdef"})],
+        predicate=Predicate(
+            buildDefinition=BuildDefinition(
+                externalParameters=ExternalParameters(
+                    package="sign-test",
+                    canonical_name="sign-test",
+                    version="1.0.0",
+                ),
+            ),
+            runDetails=RunDetails(
+                builder=Builder(),
+                metadata=RunDetailsMetadata(startedOn="2026-09-02T00:00:00Z", finishedOn="2026-09-02T00:00:00Z"),
+            ),
+        ),
+    )
     repo_dir = workspace / "pypi.org-sign-test"
     repo_dir.mkdir(parents=True, exist_ok=True)
-    meta_file = repo_dir / "meta.json"
-    meta_file.write_text("{}")
     out_prov = repo_dir / "prov.json"
 
     # When sign_key is None or empty -> returns None safely
-    assert publisher.sign_attestation(meta_file, source_file, None, out_prov) is None
-    assert publisher.sign_attestation(meta_file, source_file, "", out_prov) is None
+    assert publisher.sign_attestation(metadata, source_file, None, out_prov) is None
+    assert publisher.sign_attestation(metadata, source_file, "", out_prov) is None
 
-    # When sign_key is a non-existent file path -> returns None safely
-    assert publisher.sign_attestation(meta_file, source_file, "/non/existent/key.pem", out_prov) is None
+    # When sign_key is a non-existent file path -> fails closed with ValueError
+    with pytest.raises(ValueError, match="does not exist"):
+        publisher.sign_attestation(metadata, source_file, "/non/existent/key.pem", out_prov)
