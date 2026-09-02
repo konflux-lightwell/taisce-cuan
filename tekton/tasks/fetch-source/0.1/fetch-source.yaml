@@ -1,3 +1,4 @@
+---
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
@@ -25,9 +26,19 @@ spec:
   results:
     - name: sdistPath
       description: Relative path of the downloaded sdist file.
+  stepTemplate:
+    securityContext:
+      runAsUser: 1001
   steps:
     - name: fetch-sdist
       image: quay.io/light-castle/taisce-cuan:latest
+      computeResources:
+        limits:
+          memory: 256Mi
+          cpu: 200m
+        requests:
+          memory: 128Mi
+          cpu: 50m
       env:
         - name: HOME
           value: /tekton/home
@@ -38,10 +49,11 @@ spec:
         if [ "$(params.rhtlOnly)" = "true" ]; then
           EXTRA_FLAGS="--rhtl-only"
         fi
-        
+
         taisce-cuan fetch "$(params.packageName)" "$(params.packageVersion)" \
           --output-dir "$(workspaces.sdists.path)" \
           $EXTRA_FLAGS
-          
-        CANONICAL=$(python3 -c "import re, sys; print(re.sub(r'[-_.]+', '-', sys.argv[1]).lower())" "$(params.packageName)")
+
+        CANONICAL=$(python3 -c "import re, sys; print(re.sub(r'[-_.]+', '-', sys.argv[1]).lower())" \
+          "$(params.packageName)")
         echo -n "$(workspaces.sdists.path)/${CANONICAL}-$(params.packageVersion).tar.gz" > "$(results.sdistPath.path)"

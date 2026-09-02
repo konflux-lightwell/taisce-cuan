@@ -38,14 +38,9 @@ def get_builder_id() -> str:
     return f"https://github.com/konflux-lightwell/taisce-cuan@v{__version__}"
 
 
-class Digest(BaseModel):
-    sha256: Optional[str] = None
-    gitTree: Optional[str] = None
-
-
 class Subject(BaseModel):
     name: str
-    digest: Digest
+    digest: Dict[str, str]
 
 
 class ExternalParameters(BaseModel):
@@ -74,10 +69,27 @@ class Completeness(BaseModel):
     materials: bool = True
 
 
+class LightwellBuildsInfo(BaseModel):
+    repo: str
+    source_registry_used: str
+
+
+class FromagerInfo(BaseModel):
+    build_extra: List[str] = Field(default_factory=list)
+
+
 class RunDetailsMetadata(BaseModel):
     startedOn: str
     finishedOn: str
     completeness: Completeness = Field(default_factory=Completeness)
+    schema_version: str = "1"
+    attestation_level: str = "unsigned-inventory"
+    note: str = (
+        "Unsigned SLSA Build Provenance inventory. "
+        "Signed attestation produced by Tekton Chains / Cosign when this ingestion runs as part of Konflux."
+    )
+    lightwell_builds: Optional[LightwellBuildsInfo] = None
+    fromager: FromagerInfo = Field(default_factory=FromagerInfo)
 
 
 class Builder(BaseModel):
@@ -94,27 +106,10 @@ class Predicate(BaseModel):
     runDetails: RunDetails
 
 
-class LightwellBuildsInfo(BaseModel):
-    repo: str
-    source_registry_used: str
-
-
-class FromagerInfo(BaseModel):
-    build_extra: List[str] = Field(default_factory=list)
-
-
 class IngestionMetadata(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    schema_version: str = "1"
-    attestation_level: str = "unsigned-inventory"
-    note: str = (
-        "Unsigned SLSA Build Provenance inventory. "
-        "Signed attestation produced by Tekton Chains / Cosign when this ingestion runs as part of Konflux."
-    )
     type_: str = Field("https://in-toto.io/Statement/v0.1", alias="_type")
     predicateType: str = "https://slsa.dev/provenance/v1"
     subject: List[Subject]
     predicate: Predicate
-    lightwell_builds: LightwellBuildsInfo
-    fromager: FromagerInfo = Field(default_factory=FromagerInfo)
