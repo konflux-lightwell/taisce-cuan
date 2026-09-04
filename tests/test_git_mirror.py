@@ -51,6 +51,11 @@ def test_git_mirror_publisher_dry_run(tmp_path: Path):
     assert (repo_dir / "source" / "pyproject.toml").exists()
     assert (repo_dir / ".lightwell" / "metadata.json").exists()
 
+    # Verify both canonical tag and baseline tag were created pointing to same commit
+    canonical_commit = subprocess.check_output(["git", "rev-parse", "sample/0.1.0^{commit}"], cwd=repo_dir, text=True).strip()
+    baseline_commit = subprocess.check_output(["git", "rev-parse", "baseline/0.1.0^{commit}"], cwd=repo_dir, text=True).strip()
+    assert canonical_commit == baseline_commit
+
     meta = json.loads((repo_dir / ".lightwell" / "metadata.json").read_text())
     assert meta["predicate"]["buildDefinition"]["buildType"] == "https://lightwell.dev/buildTypes/python-source-ingest/v1"
     assert meta["predicate"]["buildDefinition"]["externalParameters"]["canonical_name"] == "sample"
@@ -241,3 +246,227 @@ def test_sign_attestation_fail_closed(tmp_path: Path):
     # When sign_key is a non-existent file path -> fails closed with ValueError
     with pytest.raises(ValueError, match="does not exist"):
         publisher.sign_attestation(metadata, source_file, "/non/existent/key.pem", out_prov)
+
+
+def test_baseline_tag_preservation_and_overwrite(tmp_path: Path):
+    source_file = create_sample_source(tmp_path, "pkg-base", "1.0.0")
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com",
+        group="testgroup",
+        committer_name="bot",
+        committer_email="bot@example.com",
+    )
+
+    # Initial ingestion
+    publisher.publish_source(
+        source_path=source_file,
+        package="pkg-base",
+        version="1.0.0",
+        workspace_dir=workspace,
+        dry_run=True,
+    )
+
+    repo_dir = workspace / "pypi.org-pkg-base"
+    init_commit = subprocess.check_output(["git", "rev-parse", "pkg-base/1.0.0^{commit}"], cwd=repo_dir, text=True).strip()
+    init_base = subprocess.check_output(["git", "rev-parse", "baseline/1.0.0^{commit}"], cwd=repo_dir, text=True).strip()
+    assert init_commit == init_base
+
+    # Simulate a backport advancing baseline/1.0.0 to a new commit
+    (repo_dir / "source" / "patch.txt").write_text("backport patch")
+    subprocess.run(["git", "add", "source/patch.txt"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "backport commit"], cwd=repo_dir, check=True)
+    backport_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo_dir, text=True).strip()
+    subprocess.run(["git", "tag", "-f", "baseline/1.0.0", backport_commit], cwd=repo_dir, check=True)
+
+    # Re-running ingestion without allow_overwrite must preserve the advanced baseline tag
+    publisher.publish_source(
+        source_path=source_file,
+        package="pkg-base",
+        version="1.0.0",
+        workspace_dir=workspace,
+        allow_overwrite=False,
+        dry_run=True,
+    )
+    current_base = subprocess.check_output(["git", "rev-parse", "baseline/1.0.0^{commit}"], cwd=repo_dir, text=True).strip()
+    assert current_base == backport_commit
+
+    # Re-running ingestion with allow_overwrite=True resets baseline tag to canonical commit
+    publisher.publish_source(
+        source_path=source_file,
+        package="pkg-base",
+        version="1.0.0",
+        workspace_dir=workspace,
+        allow_overwrite=True,
+        dry_run=True,
+    )
+    reset_base = subprocess.check_output(["git", "rev-parse", "baseline/1.0.0^{commit}"], cwd=repo_dir, text=True).strip()
+    new_canonical = subprocess.check_output(["git", "rev-parse", "pkg-base/1.0.0^{commit}"], cwd=repo_dir, text=True).strip()
+    assert reset_base == new_canonical
+    assert reset_base != backport_commit
+
+
+def test_git_mirror_publisher_real_bare_remote(tmp_path: Path):
+    # 1. Create a local bare git repository as a simulated remote
+    remote_bare = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote_bare)], check=True)
+
+    remote_url = str(remote_bare.resolve())
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com",
+        group="testgroup",
+        committer_name="remote-bot",
+        committer_email="remote-bot@example.com",
+        remote_url=remote_url,
+    )
+
+    # 2. Test GitMirrorPublisher.publish_source with dry_run=False pointing to bare remote
+    source_100 = create_sample_source(tmp_path, "pkg-remote", "1.0.0")
+    tag_100 = publisher.publish_source(
+        source_path=source_100,
+        package="pkg-remote",
+        version="1.0.0",
+        workspace_dir=workspace,
+        dry_run=False,
+    )
+    assert tag_100 == "pkg-remote/1.0.0"
+
+    # 3. Verify atomic push in the bare remote
+    # - refs/tags/<canonical>/<version> exists in the bare remote and points to right commit
+    remote_canonical_100 = subprocess.check_output(
+        ["git", "rev-parse", "refs/tags/pkg-remote/1.0.0^{commit}"], cwd=remote_bare, text=True
+    ).strip()
+    # - refs/tags/baseline/<version> exists in the bare remote and points to initial commit
+    remote_baseline_100 = subprocess.check_output(
+        ["git", "rev-parse", "refs/tags/baseline/1.0.0^{commit}"], cwd=remote_bare, text=True
+    ).strip()
+    # - refs/heads/main exists and is updated
+    remote_main_100 = subprocess.check_output(
+        ["git", "rev-parse", "refs/heads/main^{commit}"], cwd=remote_bare, text=True
+    ).strip()
+
+    assert remote_canonical_100 == remote_baseline_100
+    assert remote_canonical_100 == remote_main_100
+
+    # 4. Verify remote tag synchronization and overwrite protection over real git remote:
+    # 4a. Re-running with same content is a no-op / succeeds
+    tag_noop = publisher.publish_source(
+        source_path=source_100,
+        package="pkg-remote",
+        version="1.0.0",
+        workspace_dir=workspace,
+        dry_run=False,
+    )
+    assert tag_noop == "pkg-remote/1.0.0"
+
+    # Idempotent check from a fresh workspace where tags are fetched from remote
+    workspace_fresh = tmp_path / "workspace_fresh"
+    tag_noop_fresh = publisher.publish_source(
+        source_path=source_100,
+        package="pkg-remote",
+        version="1.0.0",
+        workspace_dir=workspace_fresh,
+        dry_run=False,
+    )
+    assert tag_noop_fresh == "pkg-remote/1.0.0"
+
+    # 4b. Advancing remote baseline/<version> (simulating a backport CT)
+    # Create a backport commit in bare remote and update baseline/1.0.0 tag to it
+    tree_id = subprocess.check_output(
+        ["git", "rev-parse", "refs/heads/main^{tree}"], cwd=remote_bare, text=True
+    ).strip()
+    backport_commit = subprocess.check_output(
+        [
+            "git",
+            "-c",
+            "user.name=test-bot",
+            "-c",
+            "user.email=test-bot@example.com",
+            "commit-tree",
+            tree_id,
+            "-p",
+            remote_canonical_100,
+            "-m",
+            "backport CT commit",
+        ],
+        cwd=remote_bare,
+        text=True,
+    ).strip()
+    subprocess.run(["git", "update-ref", "refs/tags/baseline/1.0.0", backport_commit], cwd=remote_bare, check=True)
+
+    verified_advanced_base = subprocess.check_output(
+        ["git", "rev-parse", "refs/tags/baseline/1.0.0^{commit}"], cwd=remote_bare, text=True
+    ).strip()
+    assert verified_advanced_base == backport_commit
+
+    # Running a second version ingestion maintains the advanced baseline tag when allow_overwrite=False
+    source_200 = create_sample_source(tmp_path, "pkg-remote", "2.0.0")
+    tag_200 = publisher.publish_source(
+        source_path=source_200,
+        package="pkg-remote",
+        version="2.0.0",
+        workspace_dir=workspace,
+        allow_overwrite=False,
+        dry_run=False,
+    )
+    assert tag_200 == "pkg-remote/2.0.0"
+
+    # Verify baseline/1.0.0 is still the advanced backport commit in the bare remote
+    remote_base_after_200 = subprocess.check_output(
+        ["git", "rev-parse", "refs/tags/baseline/1.0.0^{commit}"], cwd=remote_bare, text=True
+    ).strip()
+    assert remote_base_after_200 == backport_commit
+
+    # Verify 2.0.0 tags and main in bare remote
+    remote_canonical_200 = subprocess.check_output(
+        ["git", "rev-parse", "refs/tags/pkg-remote/2.0.0^{commit}"], cwd=remote_bare, text=True
+    ).strip()
+    remote_baseline_200 = subprocess.check_output(
+        ["git", "rev-parse", "refs/tags/baseline/2.0.0^{commit}"], cwd=remote_bare, text=True
+    ).strip()
+    remote_main_200 = subprocess.check_output(
+        ["git", "rev-parse", "refs/heads/main^{commit}"], cwd=remote_bare, text=True
+    ).strip()
+    assert remote_canonical_200 == remote_baseline_200 == remote_main_200
+    assert remote_canonical_200 != remote_canonical_100
+
+    # 4c. Running with allow_overwrite=True force-updates both tags in the bare remote
+    source_100_modified = create_sample_source(
+        tmp_path, "pkg-remote", "1.0.0", filename="pkg-remote-1.0.0-mod.tar.gz", extra_content="force-overwrite"
+    )
+    # First verify allow_overwrite=False raises ValueError when content differs
+    with pytest.raises(ValueError, match="allow_overwrite is False"):
+        publisher.publish_source(
+            source_path=source_100_modified,
+            package="pkg-remote",
+            version="1.0.0",
+            workspace_dir=workspace,
+            allow_overwrite=False,
+            dry_run=False,
+        )
+
+    # Now run with allow_overwrite=True
+    tag_100_overwritten = publisher.publish_source(
+        source_path=source_100_modified,
+        package="pkg-remote",
+        version="1.0.0",
+        workspace_dir=workspace,
+        allow_overwrite=True,
+        dry_run=False,
+    )
+    assert tag_100_overwritten == "pkg-remote/1.0.0"
+
+    # Verify both tags in the bare remote are updated to the newly generated commit
+    remote_canonical_100_after = subprocess.check_output(
+        ["git", "rev-parse", "refs/tags/pkg-remote/1.0.0^{commit}"], cwd=remote_bare, text=True
+    ).strip()
+    remote_baseline_100_after = subprocess.check_output(
+        ["git", "rev-parse", "refs/tags/baseline/1.0.0^{commit}"], cwd=remote_bare, text=True
+    ).strip()
+
+    assert remote_canonical_100_after == remote_baseline_100_after
+    assert remote_canonical_100_after != remote_canonical_100
+    assert remote_baseline_100_after != backport_commit
+
+

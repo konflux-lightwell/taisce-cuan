@@ -255,7 +255,12 @@ class GitMirrorPublisher:
 
         # Configure Git forge credentials safely via config rather than netloc URL
         if self.auth_token:
-            header = f"PRIVATE-TOKEN: {self.auth_token}" if "gitlab" in self.forge_url.lower() else f"Authorization: Bearer {self.auth_token}"
+            if "gitlab" in self.forge_url.lower():
+                import base64
+                basic_auth = base64.b64encode(f"{self.username}:{self.auth_token}".encode()).decode()
+                header = f"Authorization: Basic {basic_auth}"
+            else:
+                header = f"Authorization: Bearer {self.auth_token}"
             subprocess.run(["git", "config", "http.extraHeader", header], cwd=repo_dir, check=True)
 
         remote_url = self.ensure_remote_project(repo_name) if not dry_run else None
@@ -263,7 +268,12 @@ class GitMirrorPublisher:
         # Fetch remote tags and refs if remote is accessible
         if remote_url and not dry_run:
             try:
-                subprocess.run(["git", "fetch", "--tags", remote_url], cwd=repo_dir, capture_output=True, check=False)
+                subprocess.run(
+                    ["git", "fetch", "--force", "--tags", remote_url, "+refs/heads/*:refs/remotes/origin/*"],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    check=False,
+                )
             except Exception as e:
                 logger.debug(f"Could not pre-fetch remote tags: {e}")
 
@@ -273,14 +283,14 @@ class GitMirrorPublisher:
 
         # Overwrite / Idempotency check
         if tag_name in existing_tag_names:
-            if self.check_existing_tag_content(repo_dir, tag_name, source_sha256):
-                logger.info(f"Tag {tag_name} already exists with identical SHA-256 ({source_sha256}). Nothing to do.")
-                return tag_name
             if not allow_overwrite:
+                if self.check_existing_tag_content(repo_dir, tag_name, source_sha256):
+                    logger.info(f"Tag {tag_name} already exists with identical SHA-256 ({source_sha256}). Nothing to do.")
+                    return tag_name
                 raise ValueError(
                     f"Tag {tag_name} already exists with different content and allow_overwrite is False."
                 )
-            logger.warning(f"Tag {tag_name} exists but allow_overwrite=True; updating tag content.")
+            logger.warning(f"Tag {tag_name} exists but allow_overwrite=True; updating tag and baseline content.")
 
         # Determine target branch and base commit based on SemVer topology
         target_branch = "main"
@@ -290,21 +300,28 @@ class GitMirrorPublisher:
 
             if target_ver >= highest_ver:
                 target_branch = "main"
-                try:
-                    subprocess.run(["git", "checkout", "main"], cwd=repo_dir, capture_output=True, check=False)
-                except Exception:
-                    pass
+                if subprocess.run(["git", "rev-parse", "--verify", "refs/remotes/origin/main"], cwd=repo_dir, capture_output=True).returncode == 0:
+                    subprocess.run(["git", "checkout", "-B", "main", "refs/remotes/origin/main"], cwd=repo_dir, capture_output=True, check=False)
+                else:
+                    try:
+                        subprocess.run(["git", "checkout", "main"], cwd=repo_dir, capture_output=True, check=False)
+                    except Exception:
+                        pass
             else:
                 predecessors = [t for t in existing_tags if t[0] < target_ver]
                 stream_epoch = f"{target_ver.epoch}!" if target_ver.epoch else ""
                 major_minor_stream = f"stream/{stream_epoch}{target_ver.major}.{target_ver.minor}"
 
-                # Check if stream branch already exists
-                existing_branches = subprocess.check_output(["git", "branch", "--list", major_minor_stream], cwd=repo_dir, text=True).strip()
+                # Check if stream branch already exists locally or on remote
+                existing_local = subprocess.check_output(["git", "branch", "--list", major_minor_stream], cwd=repo_dir, text=True).strip()
+                has_remote_stream = subprocess.run(["git", "rev-parse", "--verify", f"refs/remotes/origin/{major_minor_stream}"], cwd=repo_dir, capture_output=True).returncode == 0
 
-                if existing_branches:
+                if existing_local:
                     logger.info(f"Checking out existing stream branch {major_minor_stream}")
                     subprocess.run(["git", "checkout", major_minor_stream], cwd=repo_dir, check=True)
+                elif has_remote_stream:
+                    logger.info(f"Checking out remote stream branch {major_minor_stream}")
+                    subprocess.run(["git", "checkout", "-b", major_minor_stream, f"refs/remotes/origin/{major_minor_stream}"], cwd=repo_dir, check=True)
                 elif predecessors:
                     nearest_ver, nearest_tag = predecessors[-1]
                     logger.info(f"Backfill detected: branching {major_minor_stream} from predecessor {nearest_tag}")
@@ -416,11 +433,23 @@ class GitMirrorPublisher:
         subprocess.run(["git", "tag", *tag_flag, tag_name], cwd=repo_dir, check=True)
         logger.info(f"Tagged {tag_name} (gitTree: {git_tree_sha}) on branch {target_branch}")
 
+        # Baseline tag creation (ADR-0005 initial baseline anchor)
+        baseline_tag = f"baseline/{version}"
+        existing_baseline = subprocess.run(
+            ["git", "tag", "--list", baseline_tag], cwd=repo_dir, capture_output=True, text=True
+        ).stdout.strip()
+
+        tags_to_push = [tag_name]
+        if not existing_baseline or allow_overwrite:
+            subprocess.run(["git", "tag", *tag_flag, baseline_tag], cwd=repo_dir, check=True)
+            logger.info(f"Tagged initial {baseline_tag} on branch {target_branch}")
+            tags_to_push.append(baseline_tag)
+
         if dry_run or not remote_url:
             logger.info("Dry-run requested; skipping git push")
             return tag_name
 
-        push_cmd = ["git", "push", "--atomic", remote_url, target_branch, tag_name]
+        push_cmd = ["git", "push", "--atomic", remote_url, target_branch, *tags_to_push]
         if allow_overwrite:
             push_cmd.insert(2, "-f")
 
