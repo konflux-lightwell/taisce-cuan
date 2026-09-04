@@ -55,6 +55,41 @@ def parse_version_safe(ver_str: str) -> Optional[Version]:
         return None
 
 
+def resolve_provenance_file(
+    source_path: Path,
+    provenance_path: Optional[Path] = None,
+) -> Optional[Tuple[Path, str]]:
+    """
+    Two-tier provenance resolution:
+    - Priority 1: Explicit provenance_path or embedded sdist-provenance.json in the same folder as the sdist.
+    - Priority 2: PipelineRun Chains provenance (chains-provenance/*.json) in the extracted artifact directory.
+    Returns (Path, description) or None.
+    """
+    if provenance_path is not None:
+        p = Path(provenance_path)
+        if p.is_file():
+            return p, f"explicit provenance path ({p.name})"
+
+    if not source_path or not source_path.parent.is_dir():
+        return None
+
+    sdist_dir = source_path.parent
+
+    # Priority 1: Embedded sdist provenance in the artifact root
+    sdist_prov = sdist_dir / "sdist-provenance.json"
+    if sdist_prov.is_file():
+        return sdist_prov, f"embedded sdist provenance ({sdist_prov.name})"
+
+    # Priority 2: PipelineRun Chains provenance fetched by extract-py-artifacts
+    chains_dir = sdist_dir / "chains-provenance"
+    if chains_dir.is_dir():
+        chains_files = sorted([f for f in chains_dir.glob("*.json") if f.is_file()])
+        if chains_files:
+            return chains_files[0], f"Chains provenance ({chains_files[0].name})"
+
+    return None
+
+
 class GitMirrorPublisher:
     """Manages git initialization, metadata creation, and pushing to Git forges with SemVer topology."""
 
@@ -411,19 +446,29 @@ class GitMirrorPublisher:
                 f.write(metadata.model_dump_json(by_alias=True, exclude_none=True, indent=2))
             subprocess.run(["git", "add", str(metadata_file)], cwd=repo_dir, check=True)
 
-        # Optional Ingestion Signing
-        if sign_key:
+        # Provenance Resolution (Tier 1 -> Tier 2 -> Tier 3)
+        provenance_target = lightwell_dir / "provenance.json"
+        resolved_prov = resolve_provenance_file(
+            source_path=source_path,
+            provenance_path=provenance_path,
+        )
+
+        if resolved_prov is not None:
+            resolved_path, tier_desc = resolved_prov
+            shutil.copyfile(resolved_path, provenance_target)
+            subprocess.run(["git", "add", str(provenance_target)], cwd=repo_dir, check=True)
+            logger.info(f"Resolved {tier_desc} from {resolved_path}; copied to {provenance_target}")
+        elif sign_key:
             logger.info("Signing key provided; generating signed attestation")
-            target_att_file = provenance_path or (lightwell_dir / "provenance.json")
             self.sign_attestation(
                 metadata=metadata,
                 source_file=source_path,
                 sign_key=sign_key,
-                output_provenance_file=target_att_file,
+                output_provenance_file=provenance_target,
             )
             subprocess.run(["git", "add", "-A", str(lightwell_dir)], cwd=repo_dir, check=True)
         else:
-            logger.info("No signing key provided; recording unsigned inventory")
+            logger.info("No provenance found and no signing key provided; recording unsigned inventory")
 
         # Amend commit with updated metadata and signature
         subprocess.run(["git", "commit", "--amend", "--no-edit"], cwd=repo_dir, check=True)
@@ -474,6 +519,7 @@ class GitMirrorPublisher:
         source_registry: str = "pypi.org",
         allow_overwrite: bool = False,
         sign_key: Optional[str] = None,
+        provenance_path: Optional[Path] = None,
         dry_run: bool = False,
     ) -> str:
         return self.publish_source(
@@ -486,5 +532,6 @@ class GitMirrorPublisher:
             source_registry=source_registry,
             allow_overwrite=allow_overwrite,
             sign_key=sign_key,
+            provenance_path=provenance_path,
             dry_run=dry_run,
         )

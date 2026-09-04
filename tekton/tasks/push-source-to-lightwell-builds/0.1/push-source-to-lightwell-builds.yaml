@@ -36,6 +36,10 @@ spec:
       description: Legacy alias for sourcePath.
       type: string
       default: ""
+    - name: provenancePath
+      description: Explicit path to provenance JSON attestation (optional).
+      type: string
+      default: ""
     - name: packageName
       description: Package name (e.g., sniffio).
       type: string
@@ -179,6 +183,22 @@ spec:
           fi
         fi
 
+        PROVENANCE_PATH="$(params.provenancePath)"
+        FILES_DIR="$(params.dataDir)/$(params.filesDir)"
+
+        if [ -z "${PROVENANCE_PATH}" ]; then
+          # Priority 1: Check for sdist-provenance.json extracted from OCI root
+          if [ -f "${FILES_DIR}/sdist-provenance.json" ]; then
+            PROVENANCE_PATH="${FILES_DIR}/sdist-provenance.json"
+          # Priority 2: Fall back to PipelineRun Chains provenance fetched by extract-py-artifacts
+          elif [ -d "${FILES_DIR}/chains-provenance" ]; then
+            FOUND_CHAINS_PROV=$(find "${FILES_DIR}/chains-provenance" -maxdepth 1 -name "*.json" 2>/dev/null | head -n 1 || true)
+            if [ -n "${FOUND_CHAINS_PROV}" ] && [ -f "${FOUND_CHAINS_PROV}" ]; then
+              PROVENANCE_PATH="${FOUND_CHAINS_PROV}"
+            fi
+          fi
+        fi
+
         FORGE_URL="$(params.gitForgeUrl)"
         if [ -z "${FORGE_URL}" ]; then
           FORGE_URL="$(params.gitlabUrl)"
@@ -222,6 +242,10 @@ spec:
 
         if [ "$(params.allowOverwrite)" = "true" ]; then
           ARGS+=("--allow-overwrite")
+        fi
+
+        if [ -n "${PROVENANCE_PATH}" ]; then
+          ARGS+=("--provenance-path=${PROVENANCE_PATH}")
         fi
 
         if [ -f "/etc/signing-secret/key.pem" ]; then
