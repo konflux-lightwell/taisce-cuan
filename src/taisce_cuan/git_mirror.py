@@ -411,10 +411,28 @@ class GitMirrorPublisher:
                 f.write(metadata.model_dump_json(by_alias=True, exclude_none=True, indent=2))
             subprocess.run(["git", "add", str(metadata_file)], cwd=repo_dir, check=True)
 
-        # Optional Ingestion Signing
-        if sign_key:
+        # Optional Ingestion Signing or Upstream Provenance Preservation
+        resolved_prov_file: Optional[Path] = None
+        if provenance_path and Path(provenance_path).is_file():
+            resolved_prov_file = Path(provenance_path)
+        else:
+            candidate_provs = [
+                source_path.parent / f"{canonical}-{version}.provenance.json",
+                source_path.parent / f"{source_path.stem}.provenance.json",
+                source_path.parent / "provenance.json",
+            ]
+            for cand in candidate_provs:
+                if cand.is_file():
+                    resolved_prov_file = cand
+                    break
+
+        target_att_file = lightwell_dir / "provenance.json"
+        if resolved_prov_file:
+            logger.info(f"Preserving existing provenance from {resolved_prov_file}")
+            shutil.copy2(resolved_prov_file, target_att_file)
+            subprocess.run(["git", "add", str(target_att_file)], cwd=repo_dir, check=True)
+        elif sign_key:
             logger.info("Signing key provided; generating signed attestation")
-            target_att_file = provenance_path or (lightwell_dir / "provenance.json")
             self.sign_attestation(
                 metadata=metadata,
                 source_file=source_path,

@@ -470,3 +470,32 @@ def test_git_mirror_publisher_real_bare_remote(tmp_path: Path):
     assert remote_baseline_100_after != backport_commit
 
 
+def test_provenance_preservation_from_sibling_or_param(tmp_path: Path):
+    source_file = create_sample_source(tmp_path, "prov-test", "1.0.0")
+    prov_file = tmp_path / "prov-test-1.0.0.provenance.json"
+    prov_file.write_text('{"statement": "upstream signed provenance payload"}')
+
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com",
+        group="testgroup",
+        committer_name="bot",
+        committer_email="bot@example.com",
+    )
+
+    tag = publisher.publish_source(
+        source_path=source_file,
+        package="prov-test",
+        version="1.0.0",
+        workspace_dir=workspace,
+        dry_run=True,
+    )
+    assert tag == "prov-test/1.0.0"
+
+    repo_dir = workspace / "pypi.org-prov-test"
+    saved_prov = repo_dir / ".lightwell" / "provenance.json"
+    assert saved_prov.exists()
+    assert "upstream signed provenance payload" in saved_prov.read_text()
+
+
+

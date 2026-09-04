@@ -179,6 +179,14 @@ spec:
           fi
         fi
 
+        FOUND_PROV=""
+        if [ -d "$(params.dataDir)/$(params.filesDir)" ]; then
+          FOUND_PROV=$(find "$(params.dataDir)/$(params.filesDir)" -name "*provenance*.json" | head -n 1)
+        fi
+        if [ -z "${FOUND_PROV}" ] && [ -d "$(params.dataDir)" ]; then
+          FOUND_PROV=$(find "$(params.dataDir)" -name "*provenance*.json" -not -path "*/.git/*" | head -n 1)
+        fi
+
         FORGE_URL="$(params.gitForgeUrl)"
         if [ -z "${FORGE_URL}" ]; then
           FORGE_URL="$(params.gitlabUrl)"
@@ -215,6 +223,10 @@ spec:
           "--committer-name=${COMMITTER_NAME}"
           "--committer-email=${COMMITTER_EMAIL}"
         )
+
+        if [ -n "${FOUND_PROV}" ]; then
+          ARGS+=("--provenance-path=${FOUND_PROV}")
+        fi
 
         if [ -n "$(params.gitRemoteUrl)" ]; then
           ARGS+=("--remote-url=$(params.gitRemoteUrl)")

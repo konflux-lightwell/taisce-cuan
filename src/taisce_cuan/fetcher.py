@@ -141,5 +141,20 @@ class SdistFetcher:
                 f"SHA-256 mismatch for {dest_file.name}: expected {target_info.sha256}, got {actual_sha256}"
             )
 
+        # If upstream provenance URL is provided (e.g. RHTL), download the signed attestation bundle
+        if target_info.provenance_url:
+            prov_dest = output_dir / f"{canonical}-{version}.provenance.json"
+            try:
+                logger.info(f"Downloading upstream provenance from {target_info.provenance_url}")
+                prov_resp = self._client.get(target_info.provenance_url)
+                if prov_resp.status_code == 200:
+                    with open(prov_dest, "wb") as f:
+                        f.write(prov_resp.content)
+                    logger.info(f"Saved upstream provenance: {prov_dest}")
+                else:
+                    logger.warning(f"Could not download upstream provenance (HTTP {prov_resp.status_code})")
+            except Exception as e:
+                logger.warning(f"Failed to fetch upstream provenance from {target_info.provenance_url}: {e}")
+
         logger.info(f"Verified {dest_file.name} (sha256: {actual_sha256})")
         return dest_file, target_info, pypi_info
