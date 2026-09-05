@@ -65,9 +65,13 @@ class SdistFetcher:
             if resp.status_code != 200:
                 return None
             data = resp.json()
+            pattern = re.compile(
+                rf"^{re.escape(canonical).replace('-', '[-_.]')}-{re.escape(version)}\.tar\.gz$",
+                re.IGNORECASE,
+            )
             for file_entry in data.get("files", []):
                 fn = file_entry.get("filename", "")
-                if fn.endswith(".tar.gz") and (f"-{version}.tar.gz" in fn or f"-{version}." in fn):
+                if pattern.match(fn):
                     return SdistSourceInfo(
                         registry="rhtl",
                         download_url=file_entry["url"],
@@ -107,23 +111,50 @@ class SdistFetcher:
         package: str,
         version: str,
         output_dir: Path,
+        registries: Optional[list[str] | str] = None,
         rhtl_only: bool = False,
     ) -> tuple[Path, SdistSourceInfo, Optional[SdistSourceInfo]]:
         """Download sdist, verify sha256, and return downloaded file path + metadata."""
         output_dir.mkdir(parents=True, exist_ok=True)
         canonical = canonicalize_name(package)
 
-        rhtl_info = self.query_rhtl(package, version)
-        pypi_info = self.query_pypi(package, version)
-
-        if rhtl_info:
-            target_info = rhtl_info
+        # Parse requested registries list
+        if isinstance(registries, str):
+            req_regs = [r.strip().lower() for r in registries.split(",") if r.strip()]
+        elif registries is not None:
+            req_regs = [r.strip().lower() for r in registries if r.strip()]
         elif rhtl_only:
-            raise RuntimeError(f"Package {package} {version} not found in RHTL and rhtl_only=True")
-        elif pypi_info:
-            target_info = pypi_info
+            req_regs = ["rhtl"]
         else:
-            raise RuntimeError(f"Package {package} {version} could not be resolved from RHTL or PyPI")
+            req_regs = ["rhtl", "pypi.org"]
+
+        target_info: Optional[SdistSourceInfo] = None
+        rhtl_info: Optional[SdistSourceInfo] = None
+        pypi_info: Optional[SdistSourceInfo] = None
+
+        for reg in req_regs:
+            if reg in ("rhtl", "packages.redhat.com"):
+                if rhtl_info is None:
+                    rhtl_info = self.query_rhtl(package, version)
+                if rhtl_info:
+                    target_info = rhtl_info
+                    break
+            elif reg in ("pypi", "pypi.org", "pypi.python.org"):
+                if pypi_info is None:
+                    pypi_info = self.query_pypi(package, version)
+                if pypi_info:
+                    target_info = pypi_info
+                    break
+
+        if not target_info:
+            raise RuntimeError(
+                f"Package {package} {version} could not be resolved from requested registries: {req_regs}"
+            )
+
+        if not target_info.sha256:
+            raise ValueError(
+                f"No SHA-256 digest provided by registry '{target_info.registry}' for {canonical}-{version}.tar.gz"
+            )
 
         dest_file = output_dir / f"{canonical}-{version}.tar.gz"
         logger.info(f"Downloading {package} {version} from {target_info.registry}: {target_info.download_url}")
@@ -135,7 +166,7 @@ class SdistFetcher:
                     f.write(chunk)
 
         actual_sha256 = compute_sha256(dest_file)
-        if target_info.sha256 and actual_sha256 != target_info.sha256:
+        if actual_sha256 != target_info.sha256:
             dest_file.unlink(missing_ok=True)
             raise ValueError(
                 f"SHA-256 mismatch for {dest_file.name}: expected {target_info.sha256}, got {actual_sha256}"

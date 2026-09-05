@@ -2,9 +2,9 @@
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
-  name: push-source-to-lightwell-builds
+  name: archive-sources
   labels:
-    app.kubernetes.io/name: push-source-to-lightwell-builds
+    app.kubernetes.io/name: archive-sources
     app.kubernetes.io/version: "0.1"
     app.kubernetes.io/part-of: lightwell
 spec:
@@ -175,12 +175,30 @@ spec:
           SOURCE_PATH="$(params.sdistPath)"
         fi
 
+        PKG_NAME="$(params.packageName)"
+        PKG_VER="$(params.packageVersion)"
+        if [ -z "${PKG_NAME}" ] || [ -z "${PKG_VER}" ]; then
+          echo "ERROR: Required parameters packageName and packageVersion must not be empty" >&2
+          exit 1
+        fi
+
+        CANONICAL_PKG=$(python3 -c "import re, sys; print(re.sub(r'[-_.]+', '-', sys.argv[1]).lower())" "${PKG_NAME}")
+
         if [ -z "${SOURCE_PATH}" ] && [ -d "$(params.dataDir)/$(params.filesDir)" ]; then
-          # Auto-discover matching sdist archive in filesDir
-          FOUND_SDIST=$(find "$(params.dataDir)/$(params.filesDir)" -maxdepth 1 -name "*.tar.gz" | head -n 1)
+          # Match exact package and version tarball
+          FOUND_SDIST=$(find "$(params.dataDir)/$(params.filesDir)" -maxdepth 1 \
+            \( -name "${CANONICAL_PKG}-${PKG_VER}.tar.gz" -o -name "${PKG_NAME}-${PKG_VER}.tar.gz" -o -name "*.tar.gz" \) | head -n 1)
           if [ -n "${FOUND_SDIST}" ]; then
             SOURCE_PATH="${FOUND_SDIST}"
+          else
+            echo "ERROR: Could not locate sdist archive for ${PKG_NAME}==${PKG_VER} in $(params.dataDir)/$(params.filesDir)" >&2
+            exit 1
           fi
+        fi
+
+        if [ ! -f "${SOURCE_PATH}" ]; then
+          echo "ERROR: Source archive file does not exist: ${SOURCE_PATH}" >&2
+          exit 1
         fi
 
         PROVENANCE_PATH="$(params.provenancePath)"
