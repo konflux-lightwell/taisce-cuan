@@ -69,6 +69,7 @@ def resolve_provenance_file(
         p = Path(provenance_path)
         if p.is_file():
             return p, f"explicit provenance path ({p.name})"
+        raise ValueError(f"Explicit provenance_path specified but file does not exist: {provenance_path}")
 
     if not source_path or not source_path.parent.is_dir():
         return None
@@ -302,15 +303,20 @@ class GitMirrorPublisher:
 
         # Fetch remote tags and refs if remote is accessible
         if remote_url and not dry_run:
-            try:
-                subprocess.run(
-                    ["git", "fetch", "--force", "--tags", remote_url, "+refs/heads/*:refs/remotes/origin/*"],
-                    cwd=repo_dir,
-                    capture_output=True,
-                    check=False,
-                )
-            except Exception as e:
-                logger.debug(f"Could not pre-fetch remote tags: {e}")
+            fetch_res = subprocess.run(
+                ["git", "fetch", "--force", "--tags", remote_url, "+refs/heads/*:refs/remotes/origin/*"],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if fetch_res.returncode != 0:
+                err = fetch_res.stderr.strip().lower()
+                # If remote is empty, git fetch returns non-zero (e.g. fatal: couldn't find remote ref)
+                if "couldn't find remote ref" in err or "empty repository" in err or "fatal: no remote repository" not in err:
+                    logger.info("Remote repository appears empty or new; initializing fresh tree")
+                else:
+                    raise RuntimeError(f"git fetch failed against {remote_url}: {fetch_res.stderr.strip()}")
 
         # Check existing tags
         existing_tags = self.get_existing_tags(repo_dir, canonical)

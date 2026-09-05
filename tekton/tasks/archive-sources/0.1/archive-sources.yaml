@@ -1,0 +1,275 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: archive-sources
+  labels:
+    app.kubernetes.io/name: archive-sources
+    app.kubernetes.io/version: "0.1"
+    app.kubernetes.io/part-of: lightwell
+spec:
+  description: |-
+    Unpacks a source archive, records SLSA Build Provenance metadata (.lightwell/metadata.json),
+    commits, tags <canonical-pkg>/<version>, and pushes to a Git forge with SemVer topology.
+  params:
+    - name: sourceDataArtifact
+      description: Trusted Artifact containing the source archives.
+      type: string
+      default: ""
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data is stored.
+      type: string
+      default: /var/workdir
+    - name: filesDir
+      description: The relative path within dataDir where files are located.
+      type: string
+      default: files
+    - name: sourcePath
+      description: Explicit path to the source archive (.tar.gz) on the workspace.
+      type: string
+      default: ""
+    - name: sdistPath
+      description: Legacy alias for sourcePath.
+      type: string
+      default: ""
+    - name: provenancePath
+      description: Explicit path to provenance JSON attestation (optional).
+      type: string
+      default: ""
+    - name: packageName
+      description: Package name (e.g., sniffio).
+      type: string
+    - name: packageVersion
+      description: Package version (e.g., 1.3.1).
+      type: string
+    - name: gitForgeUrl
+      description: Git forge base URL.
+      type: string
+      default: ""
+    - name: gitlabUrl
+      description: Legacy alias for gitForgeUrl.
+      type: string
+      default: ""
+    - name: gitGroup
+      description: Git target group or organization.
+      type: string
+      default: ""
+    - name: gitlabGroup
+      description: Legacy alias for gitGroup.
+      type: string
+      default: ""
+    - name: committerName
+      description: Git committer and author name.
+      type: string
+      default: ""
+    - name: committerEmail
+      description: Git committer and author email.
+      type: string
+      default: ""
+    - name: gitRemoteUrl
+      description: Optional explicit full remote Git repository URL.
+      type: string
+      default: ""
+    - name: allowOverwrite
+      description: Allow overwriting an existing tag with different content.
+      type: string
+      default: "false"
+    - name: signingSecretName
+      description: Name of secret containing KMS credentials or signing key for cosign attestations (optional).
+      type: string
+      default: ""
+    - name: gitSecretName
+      description: Name of the basic-auth secret containing Git forge credentials.
+      type: string
+      default: lightwell-builds-git-auth
+    - name: taskGitUrl
+      type: string
+      description: URL to git repo containing stepactions.
+      default: https://github.com/konflux-ci/release-service-catalog.git
+    - name: taskGitRevision
+      type: string
+      description: Revision in taskGitUrl repo.
+      default: production
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: git-secret
+      secret:
+        secretName: $(params.gitSecretName)
+        optional: true
+    - name: signing-secret
+      secret:
+        secretName: $(params.signingSecretName)
+        optional: true
+  stepTemplate:
+    securityContext:
+      runAsUser: 1001
+    env:
+      - name: HOME
+        value: /tekton/home
+    volumeMounts:
+      - name: workdir
+        mountPath: /var/workdir
+      - name: git-secret
+        mountPath: "/etc/git-secret"
+        readOnly: true
+      - name: signing-secret
+        mountPath: "/etc/signing-secret"
+        readOnly: true
+  steps:
+    - name: prepare-workdir
+      image: >-
+        quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      computeResources:
+        limits:
+          memory: 32Mi
+          cpu: 10m
+        requests:
+          memory: 32Mi
+          cpu: 10m
+      command:
+        - mkdir
+        - -p
+        - $(params.dataDir)
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+          cpu: 10m
+        requests:
+          memory: 64Mi
+          cpu: 10m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: push-source
+      image: quay.io/light-castle/taisce-cuan:latest
+      computeResources:
+        limits:
+          memory: 256Mi
+          cpu: 200m
+        requests:
+          memory: 128Mi
+          cpu: 50m
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        SOURCE_PATH="$(params.sourcePath)"
+        if [ -z "${SOURCE_PATH}" ]; then
+          SOURCE_PATH="$(params.sdistPath)"
+        fi
+
+        PKG_NAME="$(params.packageName)"
+        PKG_VER="$(params.packageVersion)"
+        if [ -z "${PKG_NAME}" ] || [ -z "${PKG_VER}" ]; then
+          echo "ERROR: Required parameters packageName and packageVersion must not be empty" >&2
+          exit 1
+        fi
+
+        CANONICAL_PKG=$(python3 -c "import re, sys; print(re.sub(r'[-_.]+', '-', sys.argv[1]).lower())" "${PKG_NAME}")
+
+        if [ -z "${SOURCE_PATH}" ] && [ -d "$(params.dataDir)/$(params.filesDir)" ]; then
+          # Match exact package and version tarball
+          FOUND_SDIST=$(find "$(params.dataDir)/$(params.filesDir)" -maxdepth 1 \
+            \( -name "${CANONICAL_PKG}-${PKG_VER}.tar.gz" -o -name "${PKG_NAME}-${PKG_VER}.tar.gz" -o -name "*.tar.gz" \) | head -n 1)
+          if [ -n "${FOUND_SDIST}" ]; then
+            SOURCE_PATH="${FOUND_SDIST}"
+          else
+            echo "ERROR: Could not locate sdist archive for ${PKG_NAME}==${PKG_VER} in $(params.dataDir)/$(params.filesDir)" >&2
+            exit 1
+          fi
+        fi
+
+        if [ ! -f "${SOURCE_PATH}" ]; then
+          echo "ERROR: Source archive file does not exist: ${SOURCE_PATH}" >&2
+          exit 1
+        fi
+
+        PROVENANCE_PATH="$(params.provenancePath)"
+        FILES_DIR="$(params.dataDir)/$(params.filesDir)"
+
+        if [ -z "${PROVENANCE_PATH}" ]; then
+          # Priority 1: Check for sdist-provenance.json extracted from OCI root
+          if [ -f "${FILES_DIR}/sdist-provenance.json" ]; then
+            PROVENANCE_PATH="${FILES_DIR}/sdist-provenance.json"
+          # Priority 2: Fall back to PipelineRun Chains provenance fetched by extract-py-artifacts
+          elif [ -d "${FILES_DIR}/chains-provenance" ]; then
+            FOUND_CHAINS_PROV=$(find "${FILES_DIR}/chains-provenance" -maxdepth 1 -name "*.json" 2>/dev/null | head -n 1 || true)
+            if [ -n "${FOUND_CHAINS_PROV}" ] && [ -f "${FOUND_CHAINS_PROV}" ]; then
+              PROVENANCE_PATH="${FOUND_CHAINS_PROV}"
+            fi
+          fi
+        fi
+
+        FORGE_URL="$(params.gitForgeUrl)"
+        if [ -z "${FORGE_URL}" ]; then
+          FORGE_URL="$(params.gitlabUrl)"
+        fi
+
+        GROUP="$(params.gitGroup)"
+        if [ -z "${GROUP}" ]; then
+          GROUP="$(params.gitlabGroup)"
+        fi
+
+        COMMITTER_NAME="$(params.committerName)"
+        COMMITTER_EMAIL="$(params.committerEmail)"
+
+        if [ -z "${FORGE_URL}" ] || [ -z "${GROUP}" ] || [ -z "${COMMITTER_NAME}" ] || [ -z "${COMMITTER_EMAIL}" ]; then
+          echo "Error: Required parameters gitForgeUrl, gitGroup, committerName, committerEmail must be provided"
+          exit 1
+        fi
+
+        GIT_AUTH_TOKEN=""
+        if [ -f "/etc/git-secret/password" ]; then
+          GIT_AUTH_TOKEN=$(< /etc/git-secret/password)
+        elif [ -f "/etc/git-secret/token" ]; then
+          GIT_AUTH_TOKEN=$(< /etc/git-secret/token)
+        fi
+        export GIT_AUTH_TOKEN
+
+        ARGS=(
+          "--source=${SOURCE_PATH}"
+          "--package=$(params.packageName)"
+          "--version=$(params.packageVersion)"
+          "--workspace-dir=$(params.dataDir)/work"
+          "--forge-url=${FORGE_URL}"
+          "--group=${GROUP}"
+          "--committer-name=${COMMITTER_NAME}"
+          "--committer-email=${COMMITTER_EMAIL}"
+        )
+
+        if [ -n "$(params.gitRemoteUrl)" ]; then
+          ARGS+=("--remote-url=$(params.gitRemoteUrl)")
+        fi
+
+        if [ "$(params.allowOverwrite)" = "true" ]; then
+          ARGS+=("--allow-overwrite")
+        fi
+
+        if [ -n "${PROVENANCE_PATH}" ]; then
+          ARGS+=("--provenance-path=${PROVENANCE_PATH}")
+        fi
+
+        if [ -f "/etc/signing-secret/key.pem" ]; then
+          ARGS+=("--sign-key=/etc/signing-secret/key.pem")
+        elif [ -f "/etc/signing-secret/cosign.key" ]; then
+          ARGS+=("--sign-key=/etc/signing-secret/cosign.key")
+        fi
+
+        taisce-cuan push "${ARGS[@]}"
