@@ -48,19 +48,9 @@ def extract_sdist_to_source(sdist_path: Path, dest_source_dir: Path) -> str:
     dest_source_dir.mkdir(parents=True, exist_ok=True)
 
     with tarfile.open(sdist_path, "r:*") as tar:
-        # Security check: prevent path traversal (CVE-2007-4559 style)
-        for member in tar.getmembers():
-            target_path = (dest_source_dir / member.name).resolve()
-            if not str(target_path).startswith(str(dest_source_dir.resolve())):
-                raise ValueError(f"Dangerous tar entry found: {member.name}")
-
         members = tar.getmembers()
         if not members:
             raise ValueError(f"Empty sdist archive: {sdist_path}")
-
-        # Determine root directory in tarball
-        root_parts = [m.name.split("/")[0] for m in members if "/" in m.name or m.isdir()]
-        root_dir_name = root_parts[0] if root_parts else ""
 
         # Extract to temporary staging folder
         staging_dir = dest_source_dir.parent / f".staging_{os.getpid()}"
@@ -68,9 +58,25 @@ def extract_sdist_to_source(sdist_path: Path, dest_source_dir: Path) -> str:
             shutil.rmtree(staging_dir)
         staging_dir.mkdir(parents=True, exist_ok=True)
 
+        resolved_staging = staging_dir.resolve()
+        for member in members:
+            target = (staging_dir / member.name).resolve()
+            if not target.is_relative_to(resolved_staging):
+                raise ValueError(f"Dangerous path traversal tar entry: {member.name}")
+
         try:
-            tar.extractall(path=staging_dir)
-            source_content = staging_dir / root_dir_name if root_dir_name else staging_dir
+            if hasattr(tarfile, "data_filter"):
+                tar.extractall(path=staging_dir, filter="data")
+            else:
+                tar.extractall(path=staging_dir)
+
+            top_entries = list(staging_dir.iterdir())
+            if len(top_entries) == 1 and top_entries[0].is_dir():
+                source_content = top_entries[0]
+                root_dir_name = top_entries[0].name
+            else:
+                source_content = staging_dir
+                root_dir_name = ""
 
             # Clear destination directory and copy extracted content
             for item in dest_source_dir.iterdir():
