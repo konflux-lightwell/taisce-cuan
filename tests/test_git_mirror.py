@@ -470,3 +470,62 @@ def test_git_mirror_publisher_real_bare_remote(tmp_path: Path):
     assert remote_baseline_100_after != backport_commit
 
 
+def test_two_tier_provenance_resolution_tier1_embedded(tmp_path: Path):
+    source_file = create_sample_source(tmp_path, "tier1-test", "1.0.0")
+    prov_file = tmp_path / "sdist-provenance.json"
+    prov_file.write_text('{"statement": "tier1 embedded sdist provenance"}')
+
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com",
+        group="testgroup",
+        committer_name="bot",
+        committer_email="bot@example.com",
+    )
+
+    tag = publisher.publish_source(
+        source_path=source_file,
+        package="tier1-test",
+        version="1.0.0",
+        workspace_dir=workspace,
+        dry_run=True,
+    )
+    assert tag == "tier1-test/1.0.0"
+
+    repo_dir = workspace / "pypi.org-tier1-test"
+    saved_prov = repo_dir / ".lightwell" / "provenance.json"
+    assert saved_prov.exists()
+    assert "tier1 embedded sdist provenance" in saved_prov.read_text()
+
+
+def test_two_tier_provenance_resolution_tier2_chains(tmp_path: Path):
+    source_file = create_sample_source(tmp_path, "tier2-test", "1.0.0")
+    chains_dir = tmp_path / "chains-provenance"
+    chains_dir.mkdir(parents=True, exist_ok=True)
+    chains_file = chains_dir / "sha256-abc123.json"
+    chains_file.write_text('{"statement": "tier2 chains pipelinerun provenance"}')
+
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com",
+        group="testgroup",
+        committer_name="bot",
+        committer_email="bot@example.com",
+    )
+
+    tag = publisher.publish_source(
+        source_path=source_file,
+        package="tier2-test",
+        version="1.0.0",
+        workspace_dir=workspace,
+        dry_run=True,
+    )
+    assert tag == "tier2-test/1.0.0"
+
+    repo_dir = workspace / "pypi.org-tier2-test"
+    saved_prov = repo_dir / ".lightwell" / "provenance.json"
+    assert saved_prov.exists()
+    assert "tier2 chains pipelinerun provenance" in saved_prov.read_text()
+
+
+

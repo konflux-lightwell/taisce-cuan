@@ -36,6 +36,10 @@ spec:
       description: Legacy alias for sourcePath.
       type: string
       default: ""
+    - name: provenancePath
+      description: Explicit path to provenance JSON attestation (optional).
+      type: string
+      default: ""
     - name: packageName
       description: Package name (e.g., sniffio).
       type: string
@@ -222,6 +226,10 @@ spec:
 
         if [ "$(params.allowOverwrite)" = "true" ]; then
           ARGS+=("--allow-overwrite")
+        fi
+
+        if [ -n "$(params.provenancePath)" ]; then
+          ARGS+=("--provenance-path=$(params.provenancePath)")
         fi
 
         if [ -f "/etc/signing-secret/key.pem" ]; then
