@@ -41,7 +41,8 @@ def create_parser() -> argparse.ArgumentParser:
     fetch_parser.add_argument("package", help="Package name (e.g. sniffio)")
     fetch_parser.add_argument("version", help="Package version (e.g. 1.3.1)")
     fetch_parser.add_argument("--output-dir", "-o", default="./sdists", help="Directory to save downloaded source archive")
-    fetch_parser.add_argument("--rhtl-only", action="store_true", help="Fail if not found in RHTL")
+    fetch_parser.add_argument("--registries", default="rhtl,pypi.org", help="Comma-separated ordered list of source registries to query (e.g. 'rhtl,pypi.org', 'rhtl', 'pypi.org')")
+    fetch_parser.add_argument("--rhtl-only", action="store_true", help="Fail if not found in RHTL (deprecated: use --registries=rhtl)")
 
     # push command
     push_parser = subparsers.add_parser("push", help="Unpack source archive, generate SLSA metadata, commit and push to Git forge")
@@ -71,6 +72,7 @@ def handle_fetch(args: argparse.Namespace) -> int:
             package=args.package,
             version=args.version,
             output_dir=output_dir,
+            registries=args.registries,
             rhtl_only=args.rhtl_only,
         )
         logger.info(f"Successfully fetched source archive: {sdist_path}")
