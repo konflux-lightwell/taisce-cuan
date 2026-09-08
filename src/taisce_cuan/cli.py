@@ -24,6 +24,7 @@ from pathlib import Path
 
 from taisce_cuan.fetcher import SdistFetcher
 from taisce_cuan.git_mirror import GitMirrorPublisher
+from taisce_cuan.sdist import inspect_sdist_metadata
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("taisce-cuan")
@@ -47,8 +48,8 @@ def create_parser() -> argparse.ArgumentParser:
     # push command
     push_parser = subparsers.add_parser("push", help="Unpack source archive, generate SLSA metadata, commit and push to Git forge")
     push_parser.add_argument("--source", "--sdist", "-s", required=True, dest="source", help="Path to local source archive (.tar.gz)")
-    push_parser.add_argument("--package", "-p", required=True, help="Package name")
-    push_parser.add_argument("--version", "-v", required=True, help="Package version")
+    push_parser.add_argument("--package", "-p", default=None, help="Package name (optional; auto-discovered from source archive if omitted)")
+    push_parser.add_argument("--version", "-v", default=None, help="Package version (optional; auto-discovered from source archive if omitted)")
     push_parser.add_argument("--workspace-dir", "-w", default="/tmp/taisce-work", help="Working directory for git repo")
     push_parser.add_argument("--forge-url", "--gitlab-url", required=True, help="Git forge base URL")
     push_parser.add_argument("--group", required=True, help="Target group or organization on the forge")
@@ -88,6 +89,19 @@ def handle_push(args: argparse.Namespace) -> int:
         logger.error(f"Source file does not exist: {source_path}")
         return 1
 
+    package = args.package
+    version = args.version
+
+    if not package or not version:
+        try:
+            discovered_pkg, discovered_ver = inspect_sdist_metadata(source_path)
+            package = package or discovered_pkg
+            version = version or discovered_ver
+            logger.info(f"Auto-discovered package metadata from archive: {package}=={version}")
+        except Exception as e:
+            logger.error(f"Failed to auto-discover package name or version from {source_path}: {e}")
+            return 1
+
     publisher = GitMirrorPublisher(
         forge_url=args.forge_url,
         group=args.group,
@@ -100,18 +114,18 @@ def handle_push(args: argparse.Namespace) -> int:
     try:
         tag_name = publisher.publish_source(
             source_path=source_path,
-            package=args.package,
-            version=args.version,
+            package=package,
+            version=version,
             workspace_dir=Path(args.workspace_dir),
             allow_overwrite=args.allow_overwrite,
             sign_key=args.sign_key,
             provenance_path=args.provenance_path,
             dry_run=args.dry_run,
         )
-        logger.info(f"Successfully published {args.package} {args.version} with tag {tag_name}")
+        logger.info(f"Successfully published {package} {version} with tag {tag_name}")
         return 0
     except Exception as e:
-        logger.error(f"Failed to publish {args.package} {args.version}: {e}")
+        logger.error(f"Failed to publish {package} {version}: {e}")
         return 1
 
 

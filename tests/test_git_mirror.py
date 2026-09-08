@@ -528,4 +528,29 @@ def test_two_tier_provenance_resolution_tier2_chains(tmp_path: Path):
     assert "tier2 chains pipelinerun provenance" in saved_prov.read_text()
 
 
+def test_cli_push_auto_discover_metadata(tmp_path: Path):
+    from taisce_cuan.cli import main
+    source_file = create_sample_source(tmp_path, "auto-disc-pkg", "3.2.1")
+    workspace = tmp_path / "cli_workspace"
+
+    exit_code = main([
+        "push",
+        f"--source={source_file}",
+        f"--workspace-dir={workspace}",
+        "--forge-url=https://forge.example.com",
+        "--group=testgroup",
+        "--committer-name=bot",
+        "--committer-email=bot@example.com",
+        "--dry-run",
+    ])
+    assert exit_code == 0
+    repo_dir = workspace / "pypi.org-auto-disc-pkg"
+    assert repo_dir.exists()
+    metadata_file = repo_dir / ".lightwell" / "metadata.json"
+    assert metadata_file.exists()
+    assert '"package": "auto-disc-pkg"' in metadata_file.read_text()
+    assert '"version": "3.2.1"' in metadata_file.read_text()
+
+
+
 
