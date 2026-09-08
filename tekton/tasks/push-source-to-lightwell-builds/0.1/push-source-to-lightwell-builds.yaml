@@ -41,11 +41,13 @@ spec:
       type: string
       default: ""
     - name: packageName
-      description: Package name (e.g., sniffio).
+      description: Package name (e.g., sniffio). Optional if auto-discovered from source archive.
       type: string
+      default: ""
     - name: packageVersion
-      description: Package version (e.g., 1.3.1).
+      description: Package version (e.g., 1.3.1). Optional if auto-discovered from source archive.
       type: string
+      default: ""
     - name: gitForgeUrl
       description: Git forge base URL.
       type: string
@@ -176,10 +178,43 @@ spec:
         fi
 
         if [ -z "${SOURCE_PATH}" ] && [ -d "$(params.dataDir)/$(params.filesDir)" ]; then
-          # Auto-discover matching sdist archive in filesDir
-          FOUND_SDIST=$(find "$(params.dataDir)/$(params.filesDir)" -maxdepth 1 -name "*.tar.gz" | head -n 1)
-          if [ -n "${FOUND_SDIST}" ]; then
-            SOURCE_PATH="${FOUND_SDIST}"
+          if [ -n "$(params.packageName)" ] && [ -n "$(params.packageVersion)" ]; then
+            CANONICAL_PKG=$(python3 -c "import re, sys; print(re.sub(r'[-_.]+', '-', sys.argv[1]).lower())" "$(params.packageName)")
+            # Match exact package and version tarball
+            FOUND_MATCHES=()
+            while IFS= read -r f; do
+              [ -n "$f" ] && FOUND_MATCHES+=("$f")
+            done < <(find "$(params.dataDir)/$(params.filesDir)" -maxdepth 1 \
+              \( -name "${CANONICAL_PKG}-$(params.packageVersion).tar.gz" -o -name "$(params.packageName)-$(params.packageVersion).tar.gz" \
+                 -o -name "${CANONICAL_PKG}-$(params.packageVersion).zip" -o -name "$(params.packageName)-$(params.packageVersion).zip" \
+                 -o -name "${CANONICAL_PKG}-$(params.packageVersion).tar.bz2" -o -name "$(params.packageName)-$(params.packageVersion).tar.bz2" \
+                 -o -name "${CANONICAL_PKG}-$(params.packageVersion).tar.xz" -o -name "$(params.packageName)-$(params.packageVersion).tar.xz" \))
+
+            if [ ${#FOUND_MATCHES[@]} -eq 1 ]; then
+              SOURCE_PATH="${FOUND_MATCHES[0]}"
+            elif [ ${#FOUND_MATCHES[@]} -gt 1 ]; then
+              echo "ERROR: Multiple matching archives found for $(params.packageName)==$(params.packageVersion): ${FOUND_MATCHES[*]}" >&2
+              exit 1
+            fi
+          fi
+
+          if [ -z "${SOURCE_PATH}" ]; then
+            # Auto-discover archives
+            ALL_SDISTS=()
+            while IFS= read -r f; do
+              [ -n "$f" ] && ALL_SDISTS+=("$f")
+            done < <(find "$(params.dataDir)/$(params.filesDir)" -maxdepth 1 \
+              \( -name "*.tar.gz" -o -name "*.tar.bz2" -o -name "*.tar.xz" -o -name "*.zip" \))
+
+            if [ ${#ALL_SDISTS[@]} -eq 1 ]; then
+              SOURCE_PATH="${ALL_SDISTS[0]}"
+            elif [ ${#ALL_SDISTS[@]} -gt 1 ]; then
+              echo "ERROR: Multiple sdist archives found in $(params.dataDir)/$(params.filesDir): ${ALL_SDISTS[*]}. Ambiguous autodiscovery." >&2
+              exit 1
+            else
+              echo "ERROR: Could not locate any sdist archive in $(params.dataDir)/$(params.filesDir)" >&2
+              exit 1
+            fi
           fi
         fi
 
@@ -211,14 +246,20 @@ spec:
 
         ARGS=(
           "--source=${SOURCE_PATH}"
-          "--package=$(params.packageName)"
-          "--version=$(params.packageVersion)"
           "--workspace-dir=$(params.dataDir)/work"
           "--forge-url=${FORGE_URL}"
           "--group=${GROUP}"
           "--committer-name=${COMMITTER_NAME}"
           "--committer-email=${COMMITTER_EMAIL}"
         )
+
+        if [ -n "$(params.packageName)" ]; then
+          ARGS+=("--package=$(params.packageName)")
+        fi
+
+        if [ -n "$(params.packageVersion)" ]; then
+          ARGS+=("--version=$(params.packageVersion)")
+        fi
 
         if [ -n "$(params.gitRemoteUrl)" ]; then
           ARGS+=("--remote-url=$(params.gitRemoteUrl)")
