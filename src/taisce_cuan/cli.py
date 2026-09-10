@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -53,7 +52,7 @@ def create_parser() -> argparse.ArgumentParser:
     push_parser.add_argument("--workspace-dir", "-w", default="/tmp/taisce-work", help="Working directory for git repo")
     push_parser.add_argument("--gitlab-url", default="https://gitlab.cee.redhat.com", help="GitLab base URL")
     push_parser.add_argument("--group", default="lightwell/lightwell-builds", help="GitLab target group")
-    push_parser.add_argument("--auth-token", default=os.getenv("GITLAB_TOKEN"), help="GitLab access token")
+    push_parser.add_argument("--auth-token-file", type=Path, help="Read GitLab access token from this file")
     push_parser.add_argument("--dry-run", action="store_true", help="Do not push to remote")
     push_parser.add_argument("--source-origin", help="Acquisition source-origin.json sidecar")
     push_parser.add_argument("--signer-authorization", help="Validated signer authorization artifact")
@@ -91,7 +90,7 @@ def handle_push(args: argparse.Namespace) -> int:
     publisher = GitMirrorPublisher(
         gitlab_url=args.gitlab_url,
         group=args.group,
-        auth_token=args.auth_token,
+        auth_token_file=args.auth_token_file,
     )
 
     try:

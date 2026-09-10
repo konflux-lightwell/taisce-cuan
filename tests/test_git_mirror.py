@@ -4,6 +4,14 @@ import tarfile
 from taisce_cuan.git_mirror import GitMirrorPublisher
 
 
+def test_binding_paths_include_nested_unavailable_response():
+    binding = {"upstream_provenance_unavailable": {
+        "status": "unavailable", "reason": "not-advertised",
+        "index_response": {"path": "rhtl-response.json", "sha256": "a" * 64},
+    }}
+    assert GitMirrorPublisher._binding_paths(binding) == ["rhtl-response.json"]
+
+
 def test_git_mirror_publisher_dry_run(tmp_path: Path):
     sdist_file = tmp_path / "sample-0.1.0.tar.gz"
     pkg_dir = tmp_path / "sample-0.1.0"

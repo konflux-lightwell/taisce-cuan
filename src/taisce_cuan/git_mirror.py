@@ -54,21 +54,33 @@ class GitMirrorPublisher:
         self,
         gitlab_url: str = "https://gitlab.cee.redhat.com",
         group: str = "lightwell/lightwell-builds",
-        auth_token: Optional[str] = None,
+        auth_token_file: Optional[Path] = None,
         username: str = "oauth2",
     ):
         self.gitlab_url = gitlab_url.rstrip("/")
         self.group = group.strip("/")
-        self.auth_token = auth_token
+        self.auth_token_file = auth_token_file
         self.username = username
+
+    def _auth_token(self) -> Optional[str]:
+        if not self.auth_token_file:
+            return None
+        try:
+            token = self.auth_token_file.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise ValueError(f"unable to read GitLab auth token file: {self.auth_token_file}") from exc
+        if not token:
+            raise ValueError("GitLab auth token file is empty")
+        return token
 
     def ensure_gitlab_project(self, repo_name: str) -> str:
         """Ensure the project exists under the GitLab group, creating it if missing."""
-        if not self.auth_token:
-            logger.info("No auth_token provided for GitLab API check; using standard repo URL")
+        token = self._auth_token()
+        if not token:
+            logger.info("No GitLab auth token provided; using standard repo URL")
             return f"{self.gitlab_url}/{self.group}/{repo_name}.git"
 
-        headers = {"PRIVATE-TOKEN": self.auth_token}
+        headers = {"PRIVATE-TOKEN": token}
         encoded_project = urllib.parse.quote(f"{self.group}/{repo_name}", safe="")
 
         # httpx verifies TLS by default and honors SSL_CERT_FILE/SSL_CERT_DIR
@@ -124,6 +136,11 @@ class GitMirrorPublisher:
             else: value = [value]
             for item in value:
                 if isinstance(item, dict) and isinstance(item.get("path"), str): paths.append(item["path"])
+            # unavailable evidence nests the response artifact one level deeper.
+            if isinstance(item, dict) and name == "upstream_provenance_unavailable":
+                response = item.get("index_response")
+                if isinstance(response, dict) and isinstance(response.get("path"), str):
+                    paths.append(response["path"])
         return paths
 
     def publish_sdist(self, sdist_path: Path, package: str, version: str, workspace_dir: Path,
@@ -175,12 +192,37 @@ class GitMirrorPublisher:
         explicit = ["source"] + [p for p in seen if p != "source/"]
         subprocess.run(["git", "add", "--", *explicit], cwd=repo_dir, check=True)
         digest = compute_sha256(sdist_path)
+        tag_name = f"{canonical}/{version}"
+        askpass = repo_dir / ".git-askpass"
+        env = os.environ.copy()
+        if self.auth_token_file:
+            askpass.write_text(
+                f'#!/bin/sh\ncase "$1" in\n  *Username*) printf "%s\\n" "{self.username}" ;;\n  *) cat "{self.auth_token_file}" ;;\nesac\n',
+                encoding="utf-8",
+            )
+            askpass.chmod(0o700)
+            env["GIT_ASKPASS"] = str(askpass)
+            env["GIT_TERMINAL_PROMPT"] = "0"
+        if not dry_run:
+            remote_url = self.ensure_gitlab_project(repo_name)
+            # Check all immutable targets before creating the commit or tag.
+            local_tag = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/tags/{tag_name}"], cwd=repo_dir)
+            if local_tag.returncode == 0:
+                raise ValueError(f"target tag already exists locally: {tag_name}")
+            remote_refs = subprocess.run(["git", "ls-remote", "--exit-code", remote_url,
+                                          f"refs/heads/main", f"refs/tags/{tag_name}"], cwd=repo_dir,
+                                         capture_output=True, text=True)
+            if remote_refs.returncode == 0 and remote_refs.stdout.strip():
+                raise ValueError(f"target branch or tag already exists remotely: {tag_name}")
+            if remote_refs.returncode not in (0, 2):
+                raise ValueError("unable to preflight remote target refs")
         subprocess.run(["git", "commit", "-m", f"ingest: {canonical} {version} from {source_registry}\n\nsha256: {digest}"], cwd=repo_dir, check=True)
-        tag_name = f"{canonical}/{version}"; subprocess.run(["git", "tag", "-f", tag_name], cwd=repo_dir, check=True)
-        if dry_run: return tag_name
-        remote_url = self.ensure_gitlab_project(repo_name)
-        if self.auth_token:
-            parsed = urllib.parse.urlparse(remote_url)
-            remote_url = urllib.parse.urlunparse(parsed._replace(netloc=f"{self.username}:{self.auth_token}@{parsed.netloc}"))
-        subprocess.run(["git", "push", "--atomic", remote_url, "main", "--tags"], cwd=repo_dir, check=True)
+        subprocess.run(["git", "tag", tag_name], cwd=repo_dir, check=True)
+        if dry_run:
+            askpass.unlink(missing_ok=True)
+            return tag_name
+        try:
+            subprocess.run(["git", "push", "--atomic", remote_url, "main", "--tags"], cwd=repo_dir, check=True, env=env)
+        finally:
+            askpass.unlink(missing_ok=True)
         return tag_name

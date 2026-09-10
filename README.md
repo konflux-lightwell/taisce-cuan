@@ -23,5 +23,5 @@ Both Tasks require deployment to supply the `image` parameter. It has no mutable
 ```bash
 taisce-cuan fetch sniffio 1.3.1 --output-dir /tmp/sdists
 taisce-cuan push --sdist /tmp/sdists/sniffio-1.3.1.tar.gz --package sniffio --version 1.3.1 \
-  --gitlab-url https://gitlab.cee.redhat.com --group lightwell/lightwell-builds --auth-token "$GITLAB_TOKEN"
+  --gitlab-url https://gitlab.cee.redhat.com --group lightwell/lightwell-builds --auth-token-file /var/run/secrets/gitlab/token
 ```
