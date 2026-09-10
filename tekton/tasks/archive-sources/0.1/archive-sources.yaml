@@ -81,9 +81,9 @@ spec:
       type: string
       default: "false"
     - name: signingSecretName
-      description: Name of secret containing KMS credentials or signing key for cosign attestations (optional).
+      description: Name of secret containing SIGN_KEY and/or cosign signing credentials (optional).
       type: string
-      default: ""
+      default: konflux-cosign-signing-production
     - name: gitSecretName
       description: Name of the basic-auth secret containing Git forge credentials.
       type: string
@@ -270,7 +270,23 @@ spec:
           ARGS+=("--provenance-path=$(params.provenancePath)")
         fi
 
-        if [ -f "/etc/signing-secret/key.pem" ]; then
+        # Kubernetes mounts each signing Secret key as a file. Export all
+        # environment-shaped keys so cosign can use KMS credentials (for
+        # example AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY) without
+        # copying credentials into command arguments or logs.
+        if [ -d "/etc/signing-secret" ]; then
+          for secret_file in /etc/signing-secret/*; do
+            [ -f "${secret_file}" ] || continue
+            secret_key="$(basename "${secret_file}")"
+            if [[ "${secret_key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+              export "${secret_key}=$(cat "${secret_file}")"
+            fi
+          done
+        fi
+
+        if [ -n "${SIGN_KEY:-}" ]; then
+          ARGS+=("--sign-key=${SIGN_KEY}")
+        elif [ -f "/etc/signing-secret/key.pem" ]; then
           ARGS+=("--sign-key=/etc/signing-secret/key.pem")
         elif [ -f "/etc/signing-secret/cosign.key" ]; then
           ARGS+=("--sign-key=/etc/signing-secret/cosign.key")
