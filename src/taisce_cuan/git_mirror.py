@@ -42,6 +42,7 @@ from taisce_cuan.models import (
     Digest,
 )
 from taisce_cuan.sdist import canonicalize_name, compute_sha256, extract_sdist_to_source
+from taisce_cuan.bindings import validate_bindings
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,9 @@ class GitMirrorPublisher:
         headers = {"PRIVATE-TOKEN": self.auth_token}
         encoded_project = urllib.parse.quote(f"{self.group}/{repo_name}", safe="")
 
-        with httpx.Client(timeout=15.0, verify=False) as client:
+        # httpx verifies TLS by default and honors SSL_CERT_FILE/SSL_CERT_DIR
+        # for deployments using a configured private CA.
+        with httpx.Client(timeout=15.0) as client:
             resp = client.get(f"{self.gitlab_url}/api/v4/projects/{encoded_project}", headers=headers)
             if resp.status_code == 200:
                 logger.info(f"GitLab repository {self.group}/{repo_name} exists")
@@ -140,9 +143,10 @@ class GitMirrorPublisher:
                 origin = json.loads(source_origin_path.read_text())
             except (OSError, json.JSONDecodeError) as exc:
                 raise ValueError("source origin sidecar must be valid JSON") from exc
-            if (origin.get("package") != package or origin.get("version") != version
-                    or origin.get("canonical_name") != canonical or not origin.get("download_url")
-                    or not origin.get("archive_sha256")):
+            required = {"package", "canonical_name", "version", "source_registry", "artifact_url",
+                        "declared_sha256", "verified_sha256", "provenance_url", "retrieved_at"}
+            if (set(origin) < required or origin.get("package") != package or origin.get("version") != version
+                    or origin.get("canonical_name") != canonical or origin.get("verified_sha256") != sdist_sha256):
                 raise ValueError("source origin sidecar has mismatched or incomplete associations")
             import shutil
             shutil.copyfile(source_origin_path, repo_dir / "source-origin.json")
@@ -195,11 +199,12 @@ class GitMirrorPublisher:
         with open(metadata_file, "w") as f:
             f.write(metadata.model_dump_json(by_alias=True, indent=2))
 
-        # Validate the signer/artifact boundary before creating any commit or tag.
+        # Validate catalog bindings before any commit, tag, or push. Taisce does not sign.
         if not dry_run:
-            for label, path in (("signer authorization", signer_authorization_path), ("artifact boundary", artifact_boundary_path)):
-                if path is None or not path.is_file() or not path.read_bytes().strip():
-                    raise ValueError(f"validated {label} artifact is required before push")
+            if not source_origin_path or not signer_authorization_path or not artifact_boundary_path:
+                raise ValueError("source origin, signer authorization, and artifact boundary are required before push")
+            validate_bindings(repo_dir, sdist_path, source_origin_path,
+                              signer_authorization_path, artifact_boundary_path, canonical, version)
 
         # Git stage and commit
         subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)

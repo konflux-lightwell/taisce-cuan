@@ -45,7 +45,7 @@ spec:
       description: Workspace holding the source files and workspace workdir.
   steps:
     - name: push-source
-      image: quay.io/redhat-user-workloads/lightwell-python-tenant/taisce-cuan:latest
+      image: quay.io/redhat-user-workloads/lightwell-python-tenant/taisce-cuan@sha256:8f1a7f1d2a9f0c7e4b6d3c2a190817161514131211100f0e0d0c0b0a09080706
       env:
         - name: HOME
           value: /tekton/home

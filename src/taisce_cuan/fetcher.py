@@ -27,6 +27,8 @@ class SdistSourceInfo:
     upload_time: Optional[str]
     provenance_url: Optional[str] = None
     origin_metadata: dict[str, Any] = field(default_factory=dict)
+    response_bytes: Optional[bytes] = None
+    response_status: Optional[int] = None
 
 
 class SdistFetcher:
@@ -47,7 +49,8 @@ class SdistFetcher:
                 filename = entry.get("filename", "")
                 if filename.endswith(".tar.gz") and f"-{version}." in filename:
                     return SdistSourceInfo("rhtl", entry["url"], entry.get("hashes", {}).get("sha256", ""),
-                        entry.get("size", 0), entry.get("upload-time"), entry.get("provenance"))
+                        entry.get("size", 0), entry.get("upload-time"), entry.get("provenance"),
+                        response_bytes=response.content, response_status=response.status_code)
         except (httpx.HTTPError, ValueError, KeyError) as exc:
             logger.warning("Error querying RHTL for %s %s: %s", package, version, exc)
         return None
@@ -85,8 +88,8 @@ class SdistFetcher:
         raw = response.content
         filename = "provenance-response.bin"  # explicitly not a DSSE envelope
         self._write_atomic(output_dir / filename, raw)
-        origin.update({"provenance_response_url": url, "provenance_response_sha256": hashlib.sha256(raw).hexdigest(),
-                       "provenance_response_status": response.status_code, "provenance_response_file": filename})
+        origin.update({"provenance_response_path": filename, "provenance_response_sha256": hashlib.sha256(raw).hexdigest(),
+                       "provenance_response_status": response.status_code})
         if response.status_code != 200:
             raise ValueError(f"provenance response returned HTTP {response.status_code}")
 
@@ -109,9 +112,16 @@ class SdistFetcher:
             destination.unlink(missing_ok=True)
             raise ValueError(f"SHA-256 mismatch for {destination.name}: expected {target.sha256}, got {actual}")
         origin = {"schema_version": "1", "package": package, "canonical_name": canonicalize_name(package),
-                  "version": version, "registry": target.registry, "download_url": target.download_url,
-                  "archive_sha256": actual, "archive_size": destination.stat().st_size,
+                  "version": version, "source_registry": target.registry, "artifact_url": target.download_url,
+                  "declared_sha256": target.sha256 or None, "verified_sha256": actual,
+                  "provenance_url": target.provenance_url, "retrieved_at": __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
                   "pypi_origin_metadata": (pypi_info.origin_metadata if pypi_info else {})}
+        if target.registry == "rhtl" and target.response_bytes is not None:
+            response_path = output_dir / "rhtl-response.json"
+            self._write_atomic(response_path, target.response_bytes)
+            origin.update({"rhtl_response_path": response_path.name,
+                           "rhtl_response_sha256": hashlib.sha256(target.response_bytes).hexdigest(),
+                           "rhtl_response_status": target.response_status})
         if target.provenance_url:
             self._retrieve_provenance(target.provenance_url, output_dir, origin)
         origin_path = output_dir / "source-origin.json"
