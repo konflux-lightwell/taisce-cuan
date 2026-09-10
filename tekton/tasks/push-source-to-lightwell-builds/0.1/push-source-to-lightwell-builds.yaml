@@ -9,6 +9,12 @@ spec:
   description: |-
     Unpacks an sdist archive, records SLSA Build Provenance metadata (.lightwell/metadata.json),
     commits, tags <canonical-pkg>/<version>, and pushes to lightwell-builds.
+  stepTemplate:
+    securityContext:
+      runAsUser: 1001
+    env:
+      - name: GIT_TERMINAL_PROMPT
+        value: "0"
   params:
     - name: sdistPath
       description: Path to the sdist tarball (.tar.gz) on the workspace.
@@ -51,6 +57,7 @@ spec:
     - name: gitlab-auth
       secret:
         secretName: $(params.gitSecretName)
+        defaultMode: 0400
         items:
           - key: password
             path: token

@@ -8,6 +8,12 @@ metadata:
 spec:
   description: |-
     Resolves and downloads an sdist from RHTL (PEP 691) or PyPI, verifying its SHA-256 digest.
+  stepTemplate:
+    securityContext:
+      runAsUser: 1001
+    env:
+      - name: GIT_TERMINAL_PROMPT
+        value: "0"
   params:
     - name: packageName
       description: Package name (e.g. sniffio).
