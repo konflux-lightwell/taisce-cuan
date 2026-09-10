@@ -98,179 +98,89 @@ class GitMirrorPublisher:
 
         return f"{self.gitlab_url}/{self.group}/{repo_name}.git"
 
-    def publish_sdist(
-        self,
-        sdist_path: Path,
-        package: str,
-        version: str,
-        workspace_dir: Path,
-        upstream_pypi_url: Optional[str] = None,
-        upstream_pypi_sha256: Optional[str] = None,
-        source_registry: str = "pypi.org",
-        source_origin_path: Optional[Path] = None,
-        signer_authorization_path: Optional[Path] = None,
-        artifact_boundary_path: Optional[Path] = None,
-        dry_run: bool = False,
-    ) -> str:
-        """Prepare a mirror, then publish only after validated authorization artifacts.
+    @staticmethod
+    def _copy_artifact(source: Path, destination: Path) -> None:
+        import shutil
+        if not source.is_file():
+            raise ValueError(f"binding artifact does not exist: {source}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            if destination.is_file() and destination.read_bytes() == source.read_bytes():
+                return
+            raise ValueError(f"repository artifact already exists with different bytes: {destination}")
+        temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+        try:
+            shutil.copyfile(source, temporary); temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
 
-        ``source_origin_path`` is copied as an informational sidecar. A real push
-        requires both signer authorization and artifact-boundary files; dry runs
-        intentionally remain useful without those CI-only inputs.
-        """
-        canonical = canonicalize_name(package)
-        repo_name = f"pypi.org-{canonical}"
-        repo_dir = workspace_dir / repo_name
-        repo_dir.mkdir(parents=True, exist_ok=True)
+    @staticmethod
+    def _binding_paths(binding: dict) -> list[str]:
+        paths = []
+        for name, value in binding.items():
+            if name in {"schema", "version"}: continue
+            if name == "upstream_provenance_response":
+                value = [value]
+            else: value = [value]
+            for item in value:
+                if isinstance(item, dict) and isinstance(item.get("path"), str): paths.append(item["path"])
+        return paths
 
-        sdist_sha256 = compute_sha256(sdist_path)
-        logger.info(f"Publishing {package} {version} ({sdist_sha256}) to {repo_name}")
+    def publish_sdist(self, sdist_path: Path, package: str, version: str, workspace_dir: Path,
+                      upstream_pypi_url: Optional[str] = None, upstream_pypi_sha256: Optional[str] = None,
+                      source_registry: str = "pypi.org", source_origin_path: Optional[Path] = None,
+                      signer_authorization_path: Optional[Path] = None, artifact_boundary_path: Optional[Path] = None,
+                      dry_run: bool = False) -> str:
+        """Publish catalog-finalized artifacts without generating or changing metadata."""
+        del upstream_pypi_url, upstream_pypi_sha256
+        canonical = canonicalize_name(package); repo_name = f"pypi.org-{canonical}"
+        repo_dir = workspace_dir / repo_name; repo_dir.mkdir(parents=True, exist_ok=True)
+        if not source_origin_path or not signer_authorization_path or not artifact_boundary_path:
+            raise ValueError("catalog-finalized artifacts are required; unsigned metadata generation is disabled")
+        try:
+            binding_bytes = signer_authorization_path.read_bytes(); boundary_bytes = artifact_boundary_path.read_bytes()
+            binding = json.loads(binding_bytes); boundary = json.loads(boundary_bytes)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("catalog authorization and boundary must be valid JSON") from exc
+        if binding_bytes != boundary_bytes or binding != boundary or not isinstance(binding, dict):
+            raise ValueError("authorization and artifact boundary must be byte-identical assertions")
 
-        # Git init
+        # Copy the complete binding closure before validating it; catalog metadata is immutable.
+        paths = self._binding_paths(binding) + ["source/", "source-origin.json"]
+        seen = set()
+        for relative in paths:
+            if relative in seen: continue
+            seen.add(relative)
+            candidate = Path(relative)
+            if not relative or candidate.is_absolute() or ".." in candidate.parts:
+                raise ValueError(f"binding artifact path is not repository-relative: {relative!r}")
+            destination = repo_dir / relative
+            if relative == "source/":
+                extract_sdist_to_source(sdist_path, destination); continue
+            source = workspace_dir / relative
+            if relative == "source-origin.json": source = source_origin_path
+            if relative == binding.get("normalized_archive", {}).get("path"):
+                # The finalized normalized archive is also a workspace artifact;
+                # use that exact file rather than rewriting it from the input.
+                if not source.is_file() or compute_sha256(source) != binding["normalized_archive"].get("sha256"):
+                    raise ValueError("workspace normalized archive does not match catalog binding")
+            self._copy_artifact(source, destination)
+
+        if not dry_run:
+            validate_bindings(repo_dir, sdist_path, source_origin_path, signer_authorization_path,
+                              artifact_boundary_path, canonical, version)
         subprocess.run(["git", "init", "--initial-branch=main"], cwd=repo_dir, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.name", "taisce-cuan bot"], cwd=repo_dir, check=True)
         subprocess.run(["git", "config", "user.email", "lightwell@redhat.com"], cwd=repo_dir, check=True)
-
-        # Unpack sdist into source/
-        source_dir = repo_dir / "source"
-        extract_sdist_to_source(sdist_path, source_dir)
-
-        # Preserve the normalized archive and acquisition origin as repository artifacts.
-        # The binding schema intentionally keeps this digest independent from upstream origin.
-        import shutil
-        normalized_archive = repo_dir / sdist_path.name
-        if normalized_archive.exists():
-            if normalized_archive.read_bytes() != sdist_path.read_bytes():
-                raise ValueError("normalized archive already exists with different bytes")
-        else:
-            temporary = normalized_archive.with_name(f".{normalized_archive.name}.{os.getpid()}.tmp")
-            shutil.copyfile(sdist_path, temporary)
-            temporary.replace(normalized_archive)
-        if source_origin_path:
-            if not source_origin_path.is_file():
-                raise ValueError(f"source origin sidecar does not exist: {source_origin_path}")
-            try:
-                origin = json.loads(source_origin_path.read_text())
-            except (OSError, json.JSONDecodeError) as exc:
-                raise ValueError("source origin sidecar must be valid JSON") from exc
-            required = {"package", "canonical_name", "version", "source_registry", "artifact_url",
-                        "declared_sha256", "verified_sha256", "acquired_artifact", "provenance_url", "retrieved_at"}
-            acquired_digest = origin.get("verified_sha256")
-            carrier = origin.get("acquired_artifact")
-            if (set(origin) < required or origin.get("package") != package or origin.get("version") != version
-                    or origin.get("canonical_name") != canonical
-                    or not isinstance(acquired_digest, str) or len(acquired_digest) != 64
-                    or any(c not in "0123456789abcdef" for c in acquired_digest.lower())
-                    or not isinstance(carrier, dict) or set(carrier) != {"path", "sha256"}
-                    or carrier.get("sha256") != acquired_digest
-                    or not isinstance(carrier.get("path"), str) or not carrier["path"]
-                    or Path(carrier["path"]).is_absolute() or ".." in Path(carrier["path"]).parts):
-                raise ValueError("source origin sidecar has mismatched or incomplete associations")
-            # verified_sha256 is the digest acquired from upstream. It is intentionally
-            # not compared with the normalized archive supplied to this command.
-            import shutil
-            shutil.copyfile(source_origin_path, repo_dir / "source-origin.json")
-
-        # Prepare .lightwell/metadata.json
-        lightwell_dir = repo_dir / ".lightwell"
-        lightwell_dir.mkdir(exist_ok=True)
-        metadata_file = lightwell_dir / "metadata.json"
-
-        now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        subjects = [
-            Subject(name=f"{canonical}-{version}.tar.gz", digest=Digest(sha256=sdist_sha256)),
-            Subject(name="source/", digest=Digest(gitTree="pending")),
-        ]
-
-        resolved_deps: List[ResolvedDependency] = []
-        if upstream_pypi_url:
-            resolved_deps.append(
-                ResolvedDependency(
-                    name=f"{canonical}-{version}.tar.gz (pypi.org)",
-                    uri=upstream_pypi_url,
-                    digest={"sha256": upstream_pypi_sha256 or sdist_sha256},
-                )
-            )
-
-        metadata = IngestionMetadata(
-            subject=subjects,
-            predicate=Predicate(
-                buildDefinition=BuildDefinition(
-                    externalParameters=ExternalParameters(
-                        package=package,
-                        canonical_name=canonical,
-                        version=version,
-                    ),
-                    resolvedDependencies=resolved_deps,
-                ),
-                runDetails=RunDetails(
-                    builder=Builder(),
-                    metadata=RunDetailsMetadata(startedOn=now_str, finishedOn=now_str),
-                ),
-            ),
-            lightwell_builds=LightwellBuildsInfo(
-                repo=repo_name,
-                source_registry_used=source_registry,
-            ),
-            fromager=FromagerInfo(),
-        )
-
-        with open(metadata_file, "w") as f:
-            f.write(metadata.model_dump_json(by_alias=True, indent=2))
-
-        # Validate catalog bindings before any commit, tag, or push. Taisce does not sign.
-        if not dry_run:
-            if not source_origin_path or not signer_authorization_path or not artifact_boundary_path:
-                raise ValueError("source origin, signer authorization, and artifact boundary are required before push")
-            validate_bindings(repo_dir, sdist_path, source_origin_path,
-                              signer_authorization_path, artifact_boundary_path, canonical, version)
-
-        # Git stage and commit
-        subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
-        commit_msg = f"ingest: {canonical} {version} from {source_registry}\n\nsha256: {sdist_sha256}"
-        subprocess.run(["git", "commit", "-m", commit_msg], cwd=repo_dir, check=True)
-
-        # Compute git tree sha and amend metadata
-        tree_res = subprocess.run(
-            ["git", "ls-tree", "HEAD", "source"],
-            cwd=repo_dir,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        git_tree_sha = tree_res.stdout.split()[2] if len(tree_res.stdout.split()) >= 3 else ""
-
-        if git_tree_sha:
-            metadata.subject[1].digest.gitTree = git_tree_sha
-            with open(metadata_file, "w") as f:
-                f.write(metadata.model_dump_json(by_alias=True, indent=2))
-            subprocess.run(["git", "add", str(metadata_file)], cwd=repo_dir, check=True)
-            subprocess.run(["git", "commit", "--amend", "--no-edit"], cwd=repo_dir, check=True)
-
-        tag_name = f"{canonical}/{version}"
-        subprocess.run(["git", "tag", "-f", tag_name], cwd=repo_dir, check=True)
-        logger.info(f"Tagged {tag_name} (gitTree: {git_tree_sha})")
-
-        if dry_run:
-            logger.info("Dry-run requested; skipping git push")
-            return tag_name
-
-        # Remote URL & Authentication
+        explicit = ["source"] + [p for p in seen if p != "source/"]
+        subprocess.run(["git", "add", "--", *explicit], cwd=repo_dir, check=True)
+        digest = compute_sha256(sdist_path)
+        subprocess.run(["git", "commit", "-m", f"ingest: {canonical} {version} from {source_registry}\n\nsha256: {digest}"], cwd=repo_dir, check=True)
+        tag_name = f"{canonical}/{version}"; subprocess.run(["git", "tag", "-f", tag_name], cwd=repo_dir, check=True)
+        if dry_run: return tag_name
         remote_url = self.ensure_gitlab_project(repo_name)
-
-        # In Tekton / CI environments, Git credentials can come from:
-        # 1. An explicit auth_token parameter (passed in URL netloc)
-        # 2. Standard ambient Git credential helpers / ~/.git-credentials / /tekton/home/.git-credentials
-        # 3. An SSH key or preexisting git credential configuration
         if self.auth_token:
             parsed = urllib.parse.urlparse(remote_url)
-            auth_netloc = f"{self.username}:{self.auth_token}@{parsed.netloc}"
-            push_url = urllib.parse.urlunparse(parsed._replace(netloc=auth_netloc))
-        else:
-            push_url = remote_url
-
-        # Never overwrite an existing remote branch/tag: atomic push is the final operation.
-        subprocess.run(["git", "push", "--atomic", push_url, "main", "--tags"], cwd=repo_dir, check=True)
-        logger.info(f"Pushed {repo_name} main and tag {tag_name} to GitLab")
+            remote_url = urllib.parse.urlunparse(parsed._replace(netloc=f"{self.username}:{self.auth_token}@{parsed.netloc}"))
+        subprocess.run(["git", "push", "--atomic", remote_url, "main", "--tags"], cwd=repo_dir, check=True)
         return tag_name
