@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA = "lightwell.catalog-binding"
-VERSION = 2
+VERSION = 3
 _HEX = set("0123456789abcdef")
 
 
@@ -40,6 +40,36 @@ def _repo_entry(repo: Path, value: Any, name: str) -> Path:
     return candidate
 
 
+def _unavailable(repo: Path, value: Any, origin: dict[str, Any]) -> None:
+    if not isinstance(value, dict) or set(value) != {"path", "sha256", "url", "status"}:
+        raise ValueError("upstream_provenance_unavailable must contain path, sha256, url, status")
+    if value["status"] != 200 or not isinstance(value["url"], str):
+        raise ValueError("unavailable upstream provenance requires HTTP status 200 and URL")
+    response_path = _repo_entry(repo, {"path": value["path"], "sha256": value["sha256"]},
+                               "upstream_provenance_unavailable")
+    if origin.get("rhtl_response_path") != value["path"] or origin.get("rhtl_response_sha256") != sha256(response_path):
+        raise ValueError("RHTL response evidence does not match source origin")
+    if origin.get("rhtl_response_url") != value["url"] or origin.get("rhtl_response_status") != 200:
+        raise ValueError("RHTL response URL or status does not match source origin")
+    try:
+        index = json.loads(response_path.read_bytes())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("RHTL response evidence must be valid JSON") from exc
+    if not isinstance(index, dict) or not isinstance(index.get("files"), list):
+        raise ValueError("RHTL response evidence must be a PEP 691 index")
+    matches = [item for item in index["files"] if isinstance(item, dict)
+               and item.get("url") == origin.get("artifact_url")
+               and item.get("hashes", {}).get("sha256") == origin.get("declared_sha256")]
+    if len(matches) != 1:
+        raise ValueError("RHTL response does not identify the source artifact")
+    selected = matches[0]
+    if "provenance" in selected:
+        advertised = selected["provenance"]
+        if advertised is not None and advertised != "":
+            raise ValueError("malformed advertised provenance cannot use unavailable evidence")
+        raise ValueError("empty advertised provenance cannot use unavailable evidence")
+
+
 def validate_bindings(repo_dir: Path, archive: Path, source_origin: Path,
                       authorization: Path, boundary: Path, canonical: str, version: str) -> None:
     """Require byte-identical catalog authorization and artifact-boundary assertions."""
@@ -56,13 +86,12 @@ def validate_bindings(repo_dir: Path, archive: Path, source_origin: Path,
         raise ValueError("authorization and artifact boundary must be byte-identical assertions")
     required = {"schema", "version", "source_origin", "transformation", "normalized_archive",
                 "metadata", "metadata_dsse"}
-    evidence = {"provenance_dsse", "upstream_provenance_response"}
-    if set(auth) not in (required | {"provenance_dsse"}, required | {"upstream_provenance_response"}) or ("provenance_dsse" in auth) == ("upstream_provenance_response" in auth):
-        raise ValueError("catalog binding requires exactly one provenance evidence alternative")
-    if auth.get("schema") != SCHEMA or auth.get("version") != VERSION:
+    alternatives = {"provenance_dsse", "upstream_provenance_response", "upstream_provenance_unavailable"}
+    if auth.get("schema") != SCHEMA or auth.get("version") != VERSION or set(auth) - (required | alternatives):
         raise ValueError("unsupported catalog binding schema")
+    if len(set(auth) & alternatives) != 1 or not required.issubset(auth):
+        raise ValueError("catalog binding requires exactly one provenance evidence alternative")
 
-    # Every sidecar and attestation reference is a repository-relative path.
     origin_file = _repo_entry(repo_dir, auth["source_origin"], "source_origin")
     transformation = _repo_entry(repo_dir, auth["transformation"], "transformation")
     _repo_entry(repo_dir, auth["metadata"], "metadata")
@@ -77,54 +106,51 @@ def validate_bindings(repo_dir: Path, archive: Path, source_origin: Path,
         raise ValueError("normalized_archive does not match a repository file")
     if not archive.is_file() or normalized.read_bytes() != archive.read_bytes():
         raise ValueError("normalized_archive does not match the supplied archive")
-
     try:
         origin = json.loads(origin_file.read_text())
+        transformation_data = json.loads(transformation.read_text())
     except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError("source origin sidecar must be valid JSON") from exc
+        raise ValueError("source origin and transformation must be valid JSON") from exc
     acquired = origin.get("verified_sha256")
+    expected = transformation_data.get("input", {}).get("sha256") if isinstance(transformation_data, dict) else None
+    if not isinstance(acquired, str) or not isinstance(expected, str) or acquired.lower() != expected.lower():
+        raise ValueError("acquired artifact digest does not match transformation.input.sha256")
     carrier = origin.get("acquired_artifact")
-    if not isinstance(acquired, str) or len(acquired) != 64 or set(acquired.lower()) - _HEX:
-        raise ValueError("source origin verified_sha256 is invalid")
-    if not isinstance(carrier, dict) or set(carrier) != {"path", "sha256"} or carrier["sha256"] != acquired:
-        raise ValueError("source origin acquired_artifact must pair path with verified_sha256")
-    carrier_path = Path(carrier["path"]) if isinstance(carrier.get("path"), str) else Path("/")
-    if (not isinstance(carrier.get("path"), str) or not carrier["path"] or carrier_path.is_absolute()
-            or ".." in carrier_path.parts or carrier_path.name != normalized.name):
-        raise ValueError("source origin acquired_artifact path must identify the acquired archive")
-    if sha256(normalized) != carrier["sha256"]:
-        raise ValueError("acquired_artifact does not match the bound archive")
-    # Transformation is deliberately bound independently: upstream and normalized bytes may differ.
+    if not isinstance(carrier, dict) or carrier.get("sha256", "").lower() != acquired.lower():
+        raise ValueError("source origin acquired_artifact must pair with verified_sha256")
+    carrier_path = carrier.get("path")
+    if not isinstance(carrier_path, str) or not carrier_path or Path(carrier_path).is_absolute() or ".." in Path(carrier_path).parts:
+        raise ValueError("source origin acquired_artifact path is invalid")
+    acquired_file = (source_origin.parent / carrier_path).resolve()
+    if source_origin.parent.resolve() not in acquired_file.parents or not acquired_file.is_file() or sha256(acquired_file) != acquired.lower():
+        raise ValueError("acquired_artifact does not match verified_sha256")
+    if origin.get("source_registry") != "rhtl" or origin.get("canonical_name") != canonical or str(origin.get("version")) != str(version):
+        raise ValueError("source origin identity does not match catalog binding")
     if transformation.stat().st_size == 0:
         raise ValueError("transformation evidence must not be empty")
 
     if "provenance_dsse" in auth:
         evidence_file = _repo_entry(repo_dir, auth["provenance_dsse"], "provenance_dsse")
         try:
-            raw = evidence_file.read_bytes()
-            parsed = json.loads(raw)
+            parsed = json.loads(evidence_file.read_bytes())
             if not isinstance(parsed, dict) or "payloadType" not in parsed or "payload" not in parsed:
                 raise ValueError
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             raise ValueError("provenance_dsse must be a valid DSSE envelope") from exc
-    else:
+    elif "upstream_provenance_response" in auth:
         response = auth["upstream_provenance_response"]
         if not isinstance(response, dict) or set(response) != {"path", "sha256", "url", "status"}:
             raise ValueError("upstream_provenance_response must contain path, sha256, url, status")
         if response["path"] != "provenance-response.bin" or origin.get("provenance_response_path") != response["path"]:
             raise ValueError("upstream provenance response must use provenance-response.bin")
-        raw_file = _repo_entry(repo_dir, {"path": response["path"], "sha256": response["sha256"]},
-                               "upstream_provenance_response")
-        if not isinstance(response["url"], str) or response["url"] != origin.get("provenance_url"):
-            raise ValueError("upstream provenance URL does not match source origin")
-        if response["status"] != origin.get("provenance_response_status"):
-            raise ValueError("upstream provenance status does not match source origin")
-        if origin.get("provenance_response_sha256") != sha256(raw_file):
-            raise ValueError("upstream provenance digest does not match source origin")
-        # Opaque upstream evidence is raw, not a DSSE envelope.
+        raw_file = _repo_entry(repo_dir, {"path": response["path"], "sha256": response["sha256"]}, "upstream_provenance_response")
+        if response["url"] != origin.get("provenance_url") or response["status"] != origin.get("provenance_response_status"):
+            raise ValueError("upstream provenance response does not match source origin")
         try:
             parsed = json.loads(raw_file.read_bytes())
         except json.JSONDecodeError:
             parsed = None
         if isinstance(parsed, dict) and "payloadType" in parsed:
             raise ValueError("opaque upstream provenance response must not be DSSE")
+    else:
+        _unavailable(repo_dir, auth["upstream_provenance_unavailable"], origin)

@@ -12,7 +12,9 @@ def test_catalog_binding_requires_exact_digests(tmp_path: Path):
     origin = tmp_path / "source-origin.json"
     archive.write_bytes(b"normalized archive")
     archive_digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-    origin_data = {"provenance_url": "https://example.test/p", "provenance_response_status": 200,
+    origin_data = {"source_registry": "rhtl", "canonical_name": "demo", "version": "1",
+                   "artifact_url": "https://example.test/demo-1.tar.gz", "declared_sha256": archive_digest,
+                   "provenance_url": "https://example.test/p", "provenance_response_status": 200,
                    "provenance_response_path": "provenance-response.bin",
                    "provenance_response_sha256": "x", "verified_sha256": archive_digest,
                    "acquired_artifact": {"path": archive.name, "sha256": archive_digest}}
@@ -20,7 +22,7 @@ def test_catalog_binding_requires_exact_digests(tmp_path: Path):
     repo = tmp_path / "repo"
     (repo / ".lightwell").mkdir(parents=True)
     (repo / "source-origin.json").write_bytes(origin.read_bytes())
-    (repo / "transform.txt").write_bytes(b"normalized from upstream")
+    (repo / "transform.txt").write_text(json.dumps({"input": {"sha256": archive_digest}}))
     (repo / "demo-1.tar.gz").write_bytes(archive.read_bytes())
     (repo / ".lightwell/metadata.json").write_bytes(b"metadata")
     (repo / ".lightwell/metadata.dsse").write_bytes(b'{"payloadType":"x","payload":"eA=="}')

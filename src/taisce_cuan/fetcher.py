@@ -29,6 +29,7 @@ class SdistSourceInfo:
     origin_metadata: dict[str, Any] = field(default_factory=dict)
     response_bytes: Optional[bytes] = None
     response_status: Optional[int] = None
+    response_url: Optional[str] = None
 
 
 class SdistFetcher:
@@ -48,10 +49,20 @@ class SdistFetcher:
             for entry in response.json().get("files", []):
                 filename = entry.get("filename", "")
                 if filename.endswith(".tar.gz") and f"-{version}." in filename:
+                    if "provenance" in entry:
+                        advertised = entry["provenance"]
+                        if not isinstance(advertised, str) or not advertised:
+                            raise ValueError("RHTL advertised provenance is malformed or empty")
+                    else:
+                        advertised = None
                     return SdistSourceInfo("rhtl", entry["url"], entry.get("hashes", {}).get("sha256", ""),
-                        entry.get("size", 0), entry.get("upload-time"), entry.get("provenance"),
-                        response_bytes=response.content, response_status=response.status_code)
-        except (httpx.HTTPError, ValueError, KeyError) as exc:
+                        entry.get("size", 0), entry.get("upload-time"), advertised,
+                        response_bytes=response.content, response_status=response.status_code, response_url=url)
+        except ValueError as exc:
+            if "advertised provenance" in str(exc):
+                raise
+            logger.warning("Error querying RHTL for %s %s: %s", package, version, exc)
+        except (httpx.HTTPError, KeyError) as exc:
             logger.warning("Error querying RHTL for %s %s: %s", package, version, exc)
         return None
 
@@ -126,6 +137,7 @@ class SdistFetcher:
             self._write_atomic(response_path, target.response_bytes)
             origin.update({"rhtl_response_path": response_path.name,
                            "rhtl_response_sha256": hashlib.sha256(target.response_bytes).hexdigest(),
+                           "rhtl_response_url": target.response_url,
                            "rhtl_response_status": target.response_status})
         if target.provenance_url:
             self._retrieve_provenance(target.provenance_url, output_dir, origin)

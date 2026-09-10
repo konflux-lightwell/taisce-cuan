@@ -12,7 +12,7 @@
 
 `acquired_artifact.path` is workspace-relative and names the actual downloaded archive; its digest must equal both `verified_sha256` and the bytes consumed downstream. TLS verification remains enabled and existing files are never overwritten with different bytes.
 
-For an RHTL artifact with a provenance URL, the opaque HTTP response is fetched byte-for-byte to the stable carrier filename `provenance-response.bin` (not the RHTL Simple Index response). The sidecar and v2 catalog binding carry matching `path`, `url`, `sha256`, and HTTP `status`; the binding rejects DSSE-looking opaque responses. PyPI acquisitions do not require or fetch an RHTL provenance file.
+For an RHTL artifact with a provenance URL, the opaque HTTP response is fetched byte-for-byte to the stable carrier filename `provenance-response.bin` (not the RHTL Simple Index response). The sidecar and v3 catalog binding carry matching `path`, `url`, `sha256`, and HTTP `status`; the binding rejects DSSE-looking opaque responses. v3 also supports an unavailable-provenance alternative only when the preserved PEP 691 response has no provenance field for the selected artifact. PyPI acquisitions do not require or fetch an RHTL provenance file.
 
 ## Tekton image contract
 
