@@ -138,7 +138,14 @@ class GitMirrorPublisher:
         # Preserve the normalized archive and acquisition origin as repository artifacts.
         # The binding schema intentionally keeps this digest independent from upstream origin.
         import shutil
-        shutil.copyfile(sdist_path, repo_dir / sdist_path.name)
+        normalized_archive = repo_dir / sdist_path.name
+        if normalized_archive.exists():
+            if normalized_archive.read_bytes() != sdist_path.read_bytes():
+                raise ValueError("normalized archive already exists with different bytes")
+        else:
+            temporary = normalized_archive.with_name(f".{normalized_archive.name}.{os.getpid()}.tmp")
+            shutil.copyfile(sdist_path, temporary)
+            temporary.replace(normalized_archive)
         if source_origin_path:
             if not source_origin_path.is_file():
                 raise ValueError(f"source origin sidecar does not exist: {source_origin_path}")
