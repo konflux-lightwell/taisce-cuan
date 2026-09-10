@@ -6,6 +6,8 @@ metadata:
   labels:
     app.kubernetes.io/name: fetch-source
     app.kubernetes.io/part-of: lightwell
+    # Required by tkn-bundle-oci-ta; becomes the published catalog version.
+    app.kubernetes.io/version: "0.1"
 spec:
   description: |-
     Resolves and downloads an sdist from configured registries (RHTL / PyPI), verifies its SHA-256 digest,
