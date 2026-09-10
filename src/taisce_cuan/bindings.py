@@ -9,6 +9,8 @@ from typing import Any
 SCHEMA = "lightwell.catalog-binding"
 VERSION = 3
 _HEX = set("0123456789abcdef")
+# Opaque provenance is not parsed, but DSSE detection has a bounded input.
+MAX_DSSE_INSPECTION_BYTES = 10 * 1024 * 1024
 
 
 def sha256(path: Path) -> str:
@@ -42,6 +44,8 @@ def _repo_entry(repo: Path, value: Any, name: str) -> Path:
 
 def _contains_dsse_envelope(raw: bytes) -> bool:
     """Detect a DSSE object without treating all JSON provenance as DSSE."""
+    if len(raw) > MAX_DSSE_INSPECTION_BYTES:
+        raise ValueError("opaque provenance response exceeds maximum inspection size")
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
@@ -178,6 +182,8 @@ def validate_bindings(repo_dir: Path, archive: Path, source_origin: Path,
         raw_file = _repo_entry(repo_dir, {"path": response["path"], "sha256": response["sha256"]}, "upstream_provenance_response")
         if response["url"] != origin.get("provenance_url") or response["status"] != origin.get("provenance_response_status"):
             raise ValueError("upstream provenance response does not match source origin")
+        if raw_file.stat().st_size > MAX_DSSE_INSPECTION_BYTES:
+            raise ValueError("opaque upstream provenance response exceeds maximum inspection size")
         if _contains_dsse_envelope(raw_file.read_bytes()):
             raise ValueError("opaque upstream provenance response must not be DSSE")
     else:

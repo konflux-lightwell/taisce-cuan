@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from taisce_cuan.bindings import SCHEMA, VERSION, _contains_dsse_envelope, validate_bindings
+from taisce_cuan.bindings import (MAX_DSSE_INSPECTION_BYTES, SCHEMA, VERSION,
+                                   _contains_dsse_envelope, validate_bindings)
 
 
 @pytest.mark.parametrize("raw", [
@@ -24,6 +25,11 @@ def test_opaque_provenance_rejects_dsse_with_padding_or_trailing_content(raw: by
 ])
 def test_opaque_provenance_accepts_pep740_or_non_dsse_raw_bytes(raw: bytes):
     assert not _contains_dsse_envelope(raw)
+
+
+def test_opaque_provenance_rejects_oversized_inspection_input():
+    with pytest.raises(ValueError, match="maximum inspection size"):
+        _contains_dsse_envelope(b"x" * (MAX_DSSE_INSPECTION_BYTES + 1))
 
 
 def test_catalog_binding_requires_exact_digests(tmp_path: Path):

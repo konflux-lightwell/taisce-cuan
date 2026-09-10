@@ -16,6 +16,8 @@ from taisce_cuan.sdist import canonicalize_name, compute_sha256
 logger = logging.getLogger(__name__)
 RHTL_SIMPLE_DEFAULT = "https://packages.redhat.com/api/pypi/public-trusted-libraries/main/simple"
 PYPI_API_DEFAULT = "https://pypi.org/pypi"
+# Provenance is opaque, but must still have a bounded resource commitment.
+MAX_PROVENANCE_RESPONSE_BYTES = 10 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -87,20 +89,72 @@ class SdistFetcher:
     @staticmethod
     def _write_atomic(path: Path, data: bytes) -> None:
         temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        temporary.write_bytes(data)
-        temporary.replace(path)
+        try:
+            with temporary.open("wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            # A directory fsync makes the rename durable. Windows does not support
+            # opening directories this way, so durability is best-effort there.
+            if os.name != "nt":
+                flags = getattr(os, "O_DIRECTORY", 0)
+                try:
+                    directory_fd = os.open(path.parent, os.O_RDONLY | flags)
+                except OSError:
+                    directory_fd = None
+                if directory_fd is not None:
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _retrieve_provenance(self, url: str, output_dir: Path, origin: dict[str, Any]) -> None:
         parsed = httpx.URL(url)
         if parsed.scheme not in ("http", "https"):
             raise ValueError(f"provenance URL must use HTTP(S): {url}")
-        # httpx's default verify=True provides normal verified TLS. Bytes are never parsed or rewritten.
-        response = self._client.get(url)
-        raw = response.content
-        filename = "provenance-response.bin"  # explicitly not a DSSE envelope
-        self._write_atomic(output_dir / filename, raw)
+        # Stream opaque bytes so neither httpx nor this code materializes an unbounded body.
+        with self._client.stream("GET", url) as response:
+            content_length = response.headers.get("content-length")
+            if content_length is not None:
+                try:
+                    declared_length = int(content_length)
+                except ValueError as exc:
+                    raise ValueError("provenance response has invalid Content-Length") from exc
+                if declared_length < 0 or declared_length > MAX_PROVENANCE_RESPONSE_BYTES:
+                    raise ValueError("provenance response exceeds maximum size")
+            filename = "provenance-response.bin"  # explicitly not a DSSE envelope
+            temporary = output_dir / f".{filename}.{os.getpid()}.tmp"
+            digest = hashlib.sha256()
+            total = 0
+            try:
+                with temporary.open("wb") as stream:
+                    for chunk in response.iter_bytes():
+                        total += len(chunk)
+                        if total > MAX_PROVENANCE_RESPONSE_BYTES:
+                            raise ValueError("provenance response exceeds maximum size")
+                        stream.write(chunk)
+                        digest.update(chunk)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, output_dir / filename)
+                if os.name != "nt":
+                    flags = getattr(os, "O_DIRECTORY", 0)
+                    try:
+                        directory_fd = os.open(output_dir, os.O_RDONLY | flags)
+                    except OSError:
+                        directory_fd = None
+                    if directory_fd is not None:
+                        try:
+                            os.fsync(directory_fd)
+                        finally:
+                            os.close(directory_fd)
+            finally:
+                temporary.unlink(missing_ok=True)
         origin.update({"provenance_response_path": filename, "provenance_url": url,
-                       "provenance_response_sha256": hashlib.sha256(raw).hexdigest(),
+                       "provenance_response_sha256": digest.hexdigest(),
                        "provenance_response_status": response.status_code})
         if response.status_code != 200:
             raise ValueError(f"provenance response returned HTTP {response.status_code}")
