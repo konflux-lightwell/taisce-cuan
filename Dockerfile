@@ -1,5 +1,5 @@
 # Stage 1: build the wheel
-FROM registry.access.redhat.com/ubi10/python-312-minimal@sha256:3f3c6dda26caa5b2200fba25721c7a970b1acd4677bbc9865bf25dce62da918a as builder
+FROM registry.access.redhat.com/ubi10/python-312-minimal@sha256:a267b6445515bf53c6ec272395a857be7ecedfa62cdbe2d4214ae18f80f50de3 as builder
 
 USER 0
 WORKDIR /build
@@ -14,7 +14,7 @@ RUN python3.12 -m venv /venv && \
     /venv/bin/pip install . --no-cache-dir
 
 # Stage 2: runtime image with Git and standard toolchain
-FROM registry.access.redhat.com/ubi10/python-312-minimal@sha256:3f3c6dda26caa5b2200fba25721c7a970b1acd4677bbc9865bf25dce62da918a
+FROM registry.access.redhat.com/ubi10/python-312-minimal@sha256:a267b6445515bf53c6ec272395a857be7ecedfa62cdbe2d4214ae18f80f50de3
 
 ARG GIT_COMMIT_SHA=""
 ENV GIT_COMMIT_SHA=${GIT_COMMIT_SHA}
