@@ -4,7 +4,26 @@ from pathlib import Path
 
 import pytest
 
-from taisce_cuan.bindings import SCHEMA, VERSION, validate_bindings
+from taisce_cuan.bindings import SCHEMA, VERSION, _contains_dsse_envelope, validate_bindings
+
+
+@pytest.mark.parametrize("raw", [
+    b'{"payloadType":"application/vnd.in-toto+json","payload":"eA==","signatures":[]}',
+    b' \n\t {"payloadType":"x","payload":"eA==","signatures":[]} \n padding',
+    b'{"payloadType":"x","payload":"eA==","signatures":[]} trailing JSON',
+])
+def test_opaque_provenance_rejects_dsse_with_padding_or_trailing_content(raw: bytes):
+    assert _contains_dsse_envelope(raw)
+
+
+@pytest.mark.parametrize("raw", [
+    b'{"version":1,"provenance":{"builder":{"id":"https://example.test"}}}',
+    b'{"payloadType":"x","payload":"eA=="}',
+    b'not JSON at all',
+    b'{"payloadType":"x","payload":"eA==","signatures":',
+])
+def test_opaque_provenance_accepts_pep740_or_non_dsse_raw_bytes(raw: bytes):
+    assert not _contains_dsse_envelope(raw)
 
 
 def test_catalog_binding_requires_exact_digests(tmp_path: Path):

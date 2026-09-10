@@ -40,6 +40,29 @@ def _repo_entry(repo: Path, value: Any, name: str) -> Path:
     return candidate
 
 
+def _contains_dsse_envelope(raw: bytes) -> bool:
+    """Detect a DSSE object without treating all JSON provenance as DSSE."""
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+
+    decoder = json.JSONDecoder()
+    candidate = text.lstrip()
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        # Do not let trailing content hide a DSSE object from inspection.  A
+        # non-DSSE value remains opaque even when the upstream response is not
+        # a complete JSON document.
+        try:
+            parsed, _ = decoder.raw_decode(candidate)
+        except json.JSONDecodeError:
+            return False
+    return (isinstance(parsed, dict)
+            and {"payloadType", "payload", "signatures"}.issubset(parsed))
+
+
 def _unavailable(repo: Path, value: Any, origin: dict[str, Any]) -> None:
     if not isinstance(value, dict) or set(value) != {"status", "reason", "index_response"}:
         raise ValueError("upstream_provenance_unavailable must contain status, reason, index_response")
@@ -155,11 +178,7 @@ def validate_bindings(repo_dir: Path, archive: Path, source_origin: Path,
         raw_file = _repo_entry(repo_dir, {"path": response["path"], "sha256": response["sha256"]}, "upstream_provenance_response")
         if response["url"] != origin.get("provenance_url") or response["status"] != origin.get("provenance_response_status"):
             raise ValueError("upstream provenance response does not match source origin")
-        try:
-            parsed = json.loads(raw_file.read_bytes())
-        except json.JSONDecodeError:
-            parsed = None
-        if isinstance(parsed, dict) and "payloadType" in parsed:
+        if _contains_dsse_envelope(raw_file.read_bytes()):
             raise ValueError("opaque upstream provenance response must not be DSSE")
     else:
         if registry != "rhtl":
