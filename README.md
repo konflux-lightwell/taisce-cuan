@@ -21,10 +21,10 @@ taisce-cuan push \
   --source /tmp/sdists/sniffio-1.3.1.tar.gz \
   --package sniffio \
   --version 1.3.1 \
-  --forge-url https://gitlab.cee.redhat.com \
-  --group lightwell/lightwell-builds \
-  --committer-name "Lightwell Robot" \
-  --committer-email "robot@lightwell.dev" \
+  --forge-url https://gitlab.foo.com \
+  --group repos/source-repositories \
+  --committer-name "Foo ingestion Robot" \
+  --committer-email "robot@foo.dev" \
   --auth-token "$GIT_AUTH_TOKEN"
 ```
 
