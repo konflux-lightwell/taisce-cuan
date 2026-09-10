@@ -88,6 +88,14 @@ spec:
       description: Name of the basic-auth secret containing Git forge credentials.
       type: string
       default: lightwell-builds-git-auth
+    - name: caTrustConfigMapName
+      description: Name of the ConfigMap containing the trusted CA bundle for the Git forge.
+      type: string
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      description: Key in caTrustConfigMapName containing the CA bundle.
+      type: string
+      default: ca-bundle.crt
     - name: taskGitUrl
       type: string
       description: URL to git repo containing stepactions.
@@ -107,6 +115,13 @@ spec:
       secret:
         secretName: $(params.signingSecretName)
         optional: true
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        optional: true
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
   stepTemplate:
     securityContext:
       runAsUser: 1001
@@ -121,6 +136,9 @@ spec:
         readOnly: true
       - name: signing-secret
         mountPath: "/etc/signing-secret"
+        readOnly: true
+      - name: trusted-ca
+        mountPath: "/mnt/trusted-ca"
         readOnly: true
   steps:
     - name: prepare-workdir
@@ -171,6 +189,15 @@ spec:
       script: |
         #!/usr/bin/env bash
         set -euo pipefail
+
+        # Use the tenant-injected trust bundle for both Python's GitLab API
+        # client and git's HTTPS transport. Do not fall back to disabling TLS
+        # verification when the internal GitLab chain is present.
+        if [ -f /mnt/trusted-ca/ca-bundle.crt ]; then
+          export SSL_CERT_FILE=/mnt/trusted-ca/ca-bundle.crt
+          export REQUESTS_CA_BUNDLE=/mnt/trusted-ca/ca-bundle.crt
+          export GIT_SSL_CAINFO=/mnt/trusted-ca/ca-bundle.crt
+        fi
 
         SOURCE_PATH="$(params.sourcePath)"
         if [ -z "${SOURCE_PATH}" ]; then
