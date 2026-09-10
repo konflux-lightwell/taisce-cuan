@@ -154,12 +154,17 @@ class GitMirrorPublisher:
             except (OSError, json.JSONDecodeError) as exc:
                 raise ValueError("source origin sidecar must be valid JSON") from exc
             required = {"package", "canonical_name", "version", "source_registry", "artifact_url",
-                        "declared_sha256", "verified_sha256", "provenance_url", "retrieved_at"}
+                        "declared_sha256", "verified_sha256", "acquired_artifact", "provenance_url", "retrieved_at"}
             acquired_digest = origin.get("verified_sha256")
+            carrier = origin.get("acquired_artifact")
             if (set(origin) < required or origin.get("package") != package or origin.get("version") != version
                     or origin.get("canonical_name") != canonical
                     or not isinstance(acquired_digest, str) or len(acquired_digest) != 64
-                    or any(c not in "0123456789abcdef" for c in acquired_digest.lower())):
+                    or any(c not in "0123456789abcdef" for c in acquired_digest.lower())
+                    or not isinstance(carrier, dict) or set(carrier) != {"path", "sha256"}
+                    or carrier.get("sha256") != acquired_digest
+                    or not isinstance(carrier.get("path"), str) or not carrier["path"]
+                    or Path(carrier["path"]).is_absolute() or ".." in Path(carrier["path"]).parts):
                 raise ValueError("source origin sidecar has mismatched or incomplete associations")
             # verified_sha256 is the digest acquired from upstream. It is intentionally
             # not compared with the normalized archive supplied to this command.

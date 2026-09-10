@@ -19,6 +19,10 @@ spec:
       description: Fail if package not found in RHTL.
       type: string
       default: "false"
+    - name: image
+      description: Deployment-supplied immutable image reference (must end in @sha256:<64 lowercase hex>). No default is provided.
+      type: string
+      format: string
   workspaces:
     - name: sdists
       description: Workspace directory where the downloaded sdist will be placed.
@@ -30,13 +34,17 @@ spec:
       type: string
   steps:
     - name: fetch-sdist
-      image: quay.io/redhat-user-workloads/lightwell-python-tenant/taisce-cuan@sha256:8f1a7f1d2a9f0c7e4b6d3c2a190817161514131211100f0e0d0c0b0a09080706
+      image: $(params.image)
       env:
         - name: HOME
           value: /tekton/home
       script: |
         #!/usr/bin/env bash
         set -euo pipefail
+        if ! [[ "$(params.image)" =~ ^[^@[:space:]]+@sha256:[0-9a-f]{64}$ ]]; then
+          echo "image must be an immutable registry digest" >&2
+          exit 1
+        fi
         EXTRA_FLAGS=""
         if [ "$(params.rhtlOnly)" = "true" ]; then
           EXTRA_FLAGS="--rhtl-only"

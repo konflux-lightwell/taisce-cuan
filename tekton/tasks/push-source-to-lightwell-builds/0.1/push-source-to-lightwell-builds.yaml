@@ -23,6 +23,10 @@ spec:
       description: Name of the basic-auth secret containing GitLab credentials.
       type: string
       default: lightwell-builds-git-auth
+    - name: image
+      description: Deployment-supplied immutable image reference (must end in @sha256:<64 lowercase hex>). No default is provided.
+      type: string
+      format: string
     - name: gitlabUrl
       description: GitLab base URL.
       type: string
@@ -45,7 +49,7 @@ spec:
       description: Workspace holding the source files and workspace workdir.
   steps:
     - name: push-source
-      image: quay.io/redhat-user-workloads/lightwell-python-tenant/taisce-cuan@sha256:8f1a7f1d2a9f0c7e4b6d3c2a190817161514131211100f0e0d0c0b0a09080706
+      image: $(params.image)
       env:
         - name: HOME
           value: /tekton/home
@@ -54,8 +58,13 @@ spec:
             secretKeyRef:
               name: $(params.gitSecretName)
               key: password
-      command: ["taisce-cuan", "push"]
+      command: ["bash", "-ceu", "--"]
       args:
+        - |
+          [[ "$(params.image)" =~ ^[^@[:space:]]+@sha256:[0-9a-f]{64}$ ]] || { echo "image must be an immutable registry digest" >&2; exit 1; }
+          exec "$@"
+        - taisce-cuan
+        - push
         - "--sdist=$(params.sdistPath)"
         - "--package=$(params.packageName)"
         - "--version=$(params.packageVersion)"

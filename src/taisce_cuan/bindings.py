@@ -83,8 +83,17 @@ def validate_bindings(repo_dir: Path, archive: Path, source_origin: Path,
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError("source origin sidecar must be valid JSON") from exc
     acquired = origin.get("verified_sha256")
+    carrier = origin.get("acquired_artifact")
     if not isinstance(acquired, str) or len(acquired) != 64 or set(acquired.lower()) - _HEX:
         raise ValueError("source origin verified_sha256 is invalid")
+    if not isinstance(carrier, dict) or set(carrier) != {"path", "sha256"} or carrier["sha256"] != acquired:
+        raise ValueError("source origin acquired_artifact must pair path with verified_sha256")
+    carrier_path = Path(carrier["path"]) if isinstance(carrier.get("path"), str) else Path("/")
+    if (not isinstance(carrier.get("path"), str) or not carrier["path"] or carrier_path.is_absolute()
+            or ".." in carrier_path.parts or carrier_path.name != normalized.name):
+        raise ValueError("source origin acquired_artifact path must identify the acquired archive")
+    if sha256(normalized) != carrier["sha256"]:
+        raise ValueError("acquired_artifact does not match the bound archive")
     # Transformation is deliberately bound independently: upstream and normalized bytes may differ.
     if transformation.stat().st_size == 0:
         raise ValueError("transformation evidence must not be empty")
@@ -102,6 +111,8 @@ def validate_bindings(repo_dir: Path, archive: Path, source_origin: Path,
         response = auth["upstream_provenance_response"]
         if not isinstance(response, dict) or set(response) != {"path", "sha256", "url", "status"}:
             raise ValueError("upstream_provenance_response must contain path, sha256, url, status")
+        if response["path"] != "provenance-response.bin" or origin.get("provenance_response_path") != response["path"]:
+            raise ValueError("upstream provenance response must use provenance-response.bin")
         raw_file = _repo_entry(repo_dir, {"path": response["path"], "sha256": response["sha256"]},
                                "upstream_provenance_response")
         if not isinstance(response["url"], str) or response["url"] != origin.get("provenance_url"):

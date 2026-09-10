@@ -88,7 +88,8 @@ class SdistFetcher:
         raw = response.content
         filename = "provenance-response.bin"  # explicitly not a DSSE envelope
         self._write_atomic(output_dir / filename, raw)
-        origin.update({"provenance_response_path": filename, "provenance_response_sha256": hashlib.sha256(raw).hexdigest(),
+        origin.update({"provenance_response_path": filename, "provenance_url": url,
+                       "provenance_response_sha256": hashlib.sha256(raw).hexdigest(),
                        "provenance_response_status": response.status_code})
         if response.status_code != 200:
             raise ValueError(f"provenance response returned HTTP {response.status_code}")
@@ -111,9 +112,13 @@ class SdistFetcher:
         if target.sha256 and actual.lower() != target.sha256.lower():
             destination.unlink(missing_ok=True)
             raise ValueError(f"SHA-256 mismatch for {destination.name}: expected {target.sha256}, got {actual}")
+        # Keep the acquired carrier explicit: Fromager can consume this path and digest
+        # without guessing whether verified_sha256 describes the normalized archive.
+        artifact_path = destination.name
         origin = {"schema_version": "1", "package": package, "canonical_name": canonicalize_name(package),
                   "version": version, "source_registry": target.registry, "artifact_url": target.download_url,
                   "declared_sha256": target.sha256 or None, "verified_sha256": actual,
+                  "acquired_artifact": {"path": artifact_path, "sha256": actual},
                   "provenance_url": target.provenance_url, "retrieved_at": __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
                   "pypi_origin_metadata": (pypi_info.origin_metadata if pypi_info else {})}
         if target.registry == "rhtl" and target.response_bytes is not None:

@@ -11,8 +11,11 @@ def test_catalog_binding_requires_exact_digests(tmp_path: Path):
     archive = tmp_path / "demo-1.tar.gz"
     origin = tmp_path / "source-origin.json"
     archive.write_bytes(b"normalized archive")
+    archive_digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     origin_data = {"provenance_url": "https://example.test/p", "provenance_response_status": 200,
-                   "provenance_response_sha256": "x", "verified_sha256": "a" * 64}
+                   "provenance_response_path": "provenance-response.bin",
+                   "provenance_response_sha256": "x", "verified_sha256": archive_digest,
+                   "acquired_artifact": {"path": archive.name, "sha256": archive_digest}}
     origin.write_text(json.dumps(origin_data))
     repo = tmp_path / "repo"
     (repo / ".lightwell").mkdir(parents=True)
