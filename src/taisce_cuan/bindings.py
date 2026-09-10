@@ -41,15 +41,19 @@ def _repo_entry(repo: Path, value: Any, name: str) -> Path:
 
 
 def _unavailable(repo: Path, value: Any, origin: dict[str, Any]) -> None:
-    if not isinstance(value, dict) or set(value) != {"path", "sha256", "url", "status"}:
-        raise ValueError("upstream_provenance_unavailable must contain path, sha256, url, status")
-    if value["status"] != 200 or not isinstance(value["url"], str):
-        raise ValueError("unavailable upstream provenance requires HTTP status 200 and URL")
-    response_path = _repo_entry(repo, {"path": value["path"], "sha256": value["sha256"]},
-                               "upstream_provenance_unavailable")
-    if origin.get("rhtl_response_path") != value["path"] or origin.get("rhtl_response_sha256") != sha256(response_path):
+    if not isinstance(value, dict) or set(value) != {"status", "reason", "index_response"}:
+        raise ValueError("upstream_provenance_unavailable must contain status, reason, index_response")
+    if value["status"] != "unavailable" or value["reason"] != "not-advertised":
+        raise ValueError("unavailable upstream provenance has an invalid status or reason")
+    response = value["index_response"]
+    if not isinstance(response, dict) or set(response) != {"path", "sha256", "url", "status"}:
+        raise ValueError("index_response must contain path, sha256, url, status")
+    if response["status"] != 200 or not isinstance(response["url"], str):
+        raise ValueError("unavailable index response requires HTTP status 200 and URL")
+    response_path = _repo_entry(repo, {"path": response["path"], "sha256": response["sha256"]}, "upstream_provenance_unavailable.index_response")
+    if origin.get("rhtl_response_path") != response["path"] or origin.get("rhtl_response_sha256") != sha256(response_path):
         raise ValueError("RHTL response evidence does not match source origin")
-    if origin.get("rhtl_response_url") != value["url"] or origin.get("rhtl_response_status") != 200:
+    if origin.get("rhtl_response_url") != response["url"] or origin.get("rhtl_response_status") != 200:
         raise ValueError("RHTL response URL or status does not match source origin")
     try:
         index = json.loads(response_path.read_bytes())
@@ -57,17 +61,17 @@ def _unavailable(repo: Path, value: Any, origin: dict[str, Any]) -> None:
         raise ValueError("RHTL response evidence must be valid JSON") from exc
     if not isinstance(index, dict) or not isinstance(index.get("files"), list):
         raise ValueError("RHTL response evidence must be a PEP 691 index")
-    matches = [item for item in index["files"] if isinstance(item, dict)
-               and item.get("url") == origin.get("artifact_url")
-               and item.get("hashes", {}).get("sha256") == origin.get("declared_sha256")]
+    matches = []
+    for item in index["files"]:
+        if not isinstance(item, dict) or item.get("url") != origin.get("artifact_url"):
+            continue
+        hashes = item.get("hashes")
+        if isinstance(hashes, dict) and hashes.get("sha256") == origin.get("declared_sha256"):
+            matches.append(item)
     if len(matches) != 1:
         raise ValueError("RHTL response does not identify the source artifact")
-    selected = matches[0]
-    if "provenance" in selected:
-        advertised = selected["provenance"]
-        if advertised is not None and advertised != "":
-            raise ValueError("malformed advertised provenance cannot use unavailable evidence")
-        raise ValueError("empty advertised provenance cannot use unavailable evidence")
+    if "provenance" in matches[0]:
+        raise ValueError("advertised provenance cannot use unavailable evidence")
 
 
 def validate_bindings(repo_dir: Path, archive: Path, source_origin: Path,
@@ -124,12 +128,15 @@ def validate_bindings(repo_dir: Path, archive: Path, source_origin: Path,
     acquired_file = (source_origin.parent / carrier_path).resolve()
     if source_origin.parent.resolve() not in acquired_file.parents or not acquired_file.is_file() or sha256(acquired_file) != acquired.lower():
         raise ValueError("acquired_artifact does not match verified_sha256")
-    if origin.get("source_registry") != "rhtl" or origin.get("canonical_name") != canonical or str(origin.get("version")) != str(version):
+    registry = origin.get("source_registry")
+    if registry not in {"rhtl", "pypi.org"} or origin.get("canonical_name") != canonical or str(origin.get("version")) != str(version):
         raise ValueError("source origin identity does not match catalog binding")
     if transformation.stat().st_size == 0:
         raise ValueError("transformation evidence must not be empty")
 
     if "provenance_dsse" in auth:
+        if registry != "pypi.org":
+            raise ValueError("provenance_dsse is only valid for PyPI source origins")
         evidence_file = _repo_entry(repo_dir, auth["provenance_dsse"], "provenance_dsse")
         try:
             parsed = json.loads(evidence_file.read_bytes())
@@ -138,6 +145,8 @@ def validate_bindings(repo_dir: Path, archive: Path, source_origin: Path,
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             raise ValueError("provenance_dsse must be a valid DSSE envelope") from exc
     elif "upstream_provenance_response" in auth:
+        if registry != "rhtl":
+            raise ValueError("upstream provenance response requires an RHTL source origin")
         response = auth["upstream_provenance_response"]
         if not isinstance(response, dict) or set(response) != {"path", "sha256", "url", "status"}:
             raise ValueError("upstream_provenance_response must contain path, sha256, url, status")
@@ -153,4 +162,6 @@ def validate_bindings(repo_dir: Path, archive: Path, source_origin: Path,
         if isinstance(parsed, dict) and "payloadType" in parsed:
             raise ValueError("opaque upstream provenance response must not be DSSE")
     else:
+        if registry != "rhtl":
+            raise ValueError("unavailable upstream provenance requires an RHTL source origin")
         _unavailable(repo_dir, auth["upstream_provenance_unavailable"], origin)
