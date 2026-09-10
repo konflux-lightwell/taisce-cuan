@@ -104,9 +104,17 @@ class GitMirrorPublisher:
         upstream_pypi_url: Optional[str] = None,
         upstream_pypi_sha256: Optional[str] = None,
         source_registry: str = "pypi.org",
+        source_origin_path: Optional[Path] = None,
+        signer_authorization_path: Optional[Path] = None,
+        artifact_boundary_path: Optional[Path] = None,
         dry_run: bool = False,
     ) -> str:
-        """Explode sdist, record SLSA metadata, commit, tag, and push."""
+        """Prepare a mirror, then publish only after validated authorization artifacts.
+
+        ``source_origin_path`` is copied as an informational sidecar. A real push
+        requires both signer authorization and artifact-boundary files; dry runs
+        intentionally remain useful without those CI-only inputs.
+        """
         canonical = canonicalize_name(package)
         repo_name = f"pypi.org-{canonical}"
         repo_dir = workspace_dir / repo_name
@@ -123,6 +131,21 @@ class GitMirrorPublisher:
         # Unpack sdist into source/
         source_dir = repo_dir / "source"
         extract_sdist_to_source(sdist_path, source_dir)
+
+        # Preserve acquisition origin metadata without treating it as provenance.
+        if source_origin_path:
+            if not source_origin_path.is_file():
+                raise ValueError(f"source origin sidecar does not exist: {source_origin_path}")
+            try:
+                origin = json.loads(source_origin_path.read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValueError("source origin sidecar must be valid JSON") from exc
+            if (origin.get("package") != package or origin.get("version") != version
+                    or origin.get("canonical_name") != canonical or not origin.get("download_url")
+                    or not origin.get("archive_sha256")):
+                raise ValueError("source origin sidecar has mismatched or incomplete associations")
+            import shutil
+            shutil.copyfile(source_origin_path, repo_dir / "source-origin.json")
 
         # Prepare .lightwell/metadata.json
         lightwell_dir = repo_dir / ".lightwell"
@@ -172,6 +195,12 @@ class GitMirrorPublisher:
         with open(metadata_file, "w") as f:
             f.write(metadata.model_dump_json(by_alias=True, indent=2))
 
+        # Validate the signer/artifact boundary before creating any commit or tag.
+        if not dry_run:
+            for label, path in (("signer authorization", signer_authorization_path), ("artifact boundary", artifact_boundary_path)):
+                if path is None or not path.is_file() or not path.read_bytes().strip():
+                    raise ValueError(f"validated {label} artifact is required before push")
+
         # Git stage and commit
         subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
         commit_msg = f"ingest: {canonical} {version} from {source_registry}\n\nsha256: {sdist_sha256}"
@@ -216,6 +245,7 @@ class GitMirrorPublisher:
         else:
             push_url = remote_url
 
-        subprocess.run(["git", "push", "-f", push_url, "main", "--tags"], cwd=repo_dir, check=True)
+        # Never overwrite an existing remote branch/tag: atomic push is the final operation.
+        subprocess.run(["git", "push", "--atomic", push_url, "main", "--tags"], cwd=repo_dir, check=True)
         logger.info(f"Pushed {repo_name} main and tag {tag_name} to GitLab")
         return tag_name

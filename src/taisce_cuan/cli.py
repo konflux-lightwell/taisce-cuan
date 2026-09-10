@@ -22,7 +22,7 @@ import os
 import sys
 from pathlib import Path
 
-from taisce_cuan.fetcher import SdistFetcher
+from taisce_cuan.fetcher import SdistFetcher, RHTL_SIMPLE_DEFAULT, PYPI_API_DEFAULT
 from taisce_cuan.git_mirror import GitMirrorPublisher
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -42,6 +42,8 @@ def create_parser() -> argparse.ArgumentParser:
     fetch_parser.add_argument("version", help="Package version (e.g. 1.3.1)")
     fetch_parser.add_argument("--output-dir", "-o", default="./sdists", help="Directory to save downloaded sdist")
     fetch_parser.add_argument("--rhtl-only", action="store_true", help="Fail if not found in RHTL")
+    fetch_parser.add_argument("--rhtl-simple-url", default=None, help=argparse.SUPPRESS)
+    fetch_parser.add_argument("--pypi-api-url", default=None, help=argparse.SUPPRESS)
 
     # push command
     push_parser = subparsers.add_parser("push", help="Unpack sdist, generate SLSA metadata, commit and push to GitLab")
@@ -53,12 +55,18 @@ def create_parser() -> argparse.ArgumentParser:
     push_parser.add_argument("--group", default="lightwell/lightwell-builds", help="GitLab target group")
     push_parser.add_argument("--auth-token", default=os.getenv("GITLAB_TOKEN"), help="GitLab access token")
     push_parser.add_argument("--dry-run", action="store_true", help="Do not push to remote")
+    push_parser.add_argument("--source-origin", help="Acquisition source-origin.json sidecar")
+    push_parser.add_argument("--signer-authorization", help="Validated signer authorization artifact")
+    push_parser.add_argument("--artifact-boundary", help="Validated artifact boundary artifact")
 
     return parser
 
 
 def handle_fetch(args: argparse.Namespace) -> int:
-    fetcher = SdistFetcher()
+    fetcher = SdistFetcher(
+        rhtl_simple_url=args.rhtl_simple_url or RHTL_SIMPLE_DEFAULT,
+        pypi_api_url=args.pypi_api_url or PYPI_API_DEFAULT,
+    )
     output_dir = Path(args.output_dir)
     try:
         sdist_path, source_info, _ = fetcher.fetch(
@@ -92,6 +100,9 @@ def handle_push(args: argparse.Namespace) -> int:
             package=args.package,
             version=args.version,
             workspace_dir=Path(args.workspace_dir),
+            source_origin_path=Path(args.source_origin) if args.source_origin else None,
+            signer_authorization_path=Path(args.signer_authorization) if args.signer_authorization else None,
+            artifact_boundary_path=Path(args.artifact_boundary) if args.artifact_boundary else None,
             dry_run=args.dry_run,
         )
         logger.info(f"Successfully published {args.package} {args.version} with tag {tag_name}")

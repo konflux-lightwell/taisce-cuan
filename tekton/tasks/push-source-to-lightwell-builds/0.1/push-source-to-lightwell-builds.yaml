@@ -31,6 +31,15 @@ spec:
       description: GitLab target group.
       type: string
       default: lightwell/lightwell-builds
+    - name: sourceOriginPath
+      description: Source-origin sidecar from acquisition.
+      type: string
+    - name: signerAuthorizationPath
+      description: Validated signer authorization artifact.
+      type: string
+    - name: artifactBoundaryPath
+      description: Validated artifact boundary artifact.
+      type: string
   workspaces:
     - name: workspace
       description: Workspace holding the source files and workspace workdir.
@@ -54,3 +63,6 @@ spec:
         - "--gitlab-url=$(params.gitlabUrl)"
         - "--group=$(params.gitlabGroup)"
         - "--auth-token=$(GITLAB_TOKEN)"
+        - "--source-origin=$(params.sourceOriginPath)"
+        - "--signer-authorization=$(params.signerAuthorizationPath)"
+        - "--artifact-boundary=$(params.artifactBoundaryPath)"
