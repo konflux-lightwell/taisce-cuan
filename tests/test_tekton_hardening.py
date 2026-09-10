@@ -24,8 +24,9 @@ def test_push_source_runs_every_step_as_non_root_and_disables_git_prompts():
     assert '      - name: GIT_TERMINAL_PROMPT\n        value: "0"' in text
 
 
-def test_git_credentials_are_read_only_with_restricted_default_mode():
+def test_git_credentials_are_readable_only_by_the_release_group():
     text = _task_text(PUSH_TASK)
 
-    assert "        defaultMode: 0400" in text
+    assert "  stepTemplate:\n    securityContext:\n      runAsUser: 1001\n      runAsGroup: 1001" in text
+    assert "        defaultMode: 0440" in text
     assert "          mountPath: /var/run/secrets/gitlab\n          readOnly: true" in text

@@ -12,6 +12,7 @@ spec:
   stepTemplate:
     securityContext:
       runAsUser: 1001
+      runAsGroup: 1001
     env:
       - name: GIT_TERMINAL_PROMPT
         value: "0"
@@ -57,7 +58,7 @@ spec:
     - name: gitlab-auth
       secret:
         secretName: $(params.gitSecretName)
-        defaultMode: 0400
+        defaultMode: 0440
         items:
           - key: password
             path: token
