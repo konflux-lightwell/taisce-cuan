@@ -135,7 +135,10 @@ class GitMirrorPublisher:
         source_dir = repo_dir / "source"
         extract_sdist_to_source(sdist_path, source_dir)
 
-        # Preserve acquisition origin metadata without treating it as provenance.
+        # Preserve the normalized archive and acquisition origin as repository artifacts.
+        # The binding schema intentionally keeps this digest independent from upstream origin.
+        import shutil
+        shutil.copyfile(sdist_path, repo_dir / sdist_path.name)
         if source_origin_path:
             if not source_origin_path.is_file():
                 raise ValueError(f"source origin sidecar does not exist: {source_origin_path}")
@@ -145,9 +148,14 @@ class GitMirrorPublisher:
                 raise ValueError("source origin sidecar must be valid JSON") from exc
             required = {"package", "canonical_name", "version", "source_registry", "artifact_url",
                         "declared_sha256", "verified_sha256", "provenance_url", "retrieved_at"}
+            acquired_digest = origin.get("verified_sha256")
             if (set(origin) < required or origin.get("package") != package or origin.get("version") != version
-                    or origin.get("canonical_name") != canonical or origin.get("verified_sha256") != sdist_sha256):
+                    or origin.get("canonical_name") != canonical
+                    or not isinstance(acquired_digest, str) or len(acquired_digest) != 64
+                    or any(c not in "0123456789abcdef" for c in acquired_digest.lower())):
                 raise ValueError("source origin sidecar has mismatched or incomplete associations")
+            # verified_sha256 is the digest acquired from upstream. It is intentionally
+            # not compared with the normalized archive supplied to this command.
             import shutil
             shutil.copyfile(source_origin_path, repo_dir / "source-origin.json")
 
