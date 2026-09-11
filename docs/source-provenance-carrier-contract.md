@@ -26,7 +26,8 @@ downloads/
   <canonical-package>-<version>.tar.gz  # exact upstream-acquired sdist
 source-origin.json                      # Taisce acquisition record
 rhtl-index.pep691.json                  # RHTL only
-provenance.pep740.json                  # RHTL only; advertised provenance only
+provenance.pep740.json                  # exact raw RHTL response bytes
+provenance.dsse.json                    # adapted RHTL DSSE envelope (verified)
 ```
 
 `source-origin.json` binds the selected upstream artifact URL, declared and
@@ -34,7 +35,8 @@ verified SHA-256, and the relative `downloads/` path. For RHTL it also records
 one of these evidence states:
 
 - **advertised**: `provenance.pep740.json` is the exact response retrieved from
-the provenance URL advertised by the selected PEP 691 entry;
+the provenance URL advertised by the selected PEP 691 entry. The raw file is
+never parsed and rewritten or decoded; the adapted DSSE is a separate file;
 - **not advertised**: `rhtl-index.pep691.json` is the exact PEP 691 response
 showing that the selected entry did not advertise provenance;
 - **PyPI**: no RHTL evidence file is present.
@@ -91,25 +93,59 @@ sdist into `source/`, and writes:
 .lightwell/sdist-transformation.json
 ```
 
-For PyPI only it also writes a Lightwell-generated:
+For RHTL with advertised provenance, the final mirror retains the raw upstream
+response and its separate adapted DSSE evidence:
 
 ```text
-.lightwell/provenance.dsse.json
+.lightwell/provenance.pep740.json       # exact raw advertised response
+.lightwell/provenance.dsse.json         # representation-only adaptation
 ```
 
-For RHTL, the final mirror instead retains exactly the applicable opaque
-upstream evidence:
+For an unadvertised RHTL response, it retains instead:
 
 ```text
-.lightwell/provenance.pep740.json       # advertised provenance
-# or
 .lightwell/rhtl-index.pep691.json       # provenance not advertised
 ```
 
-`metadata.dsse.json` is Lightwell-signed for every published route. There is
-no signed final Git tree hash: adding metadata and attestation files changes
-the Git tree, so the signed binding is the normalized archive and evidence
-closure instead.
+For PyPI, no upstream PEP 740 evidence is synthesized; when a signing key is
+configured, Lightwell writes its own signed attestation over the normalized
+archive to `.lightwell/provenance.dsse.json`.
+
+For advertised RHTL evidence, `provenance.dsse.json` is built only from the
+original base64 strings at `attestation_bundles[0].attestations[0].envelope`:
+`statement` becomes `payload` and `signature` becomes `signatures[0].sig`,
+with fixed payload type `application/vnd.in-toto+json`. It is verified with
+Cosign `verify-blob-attestation --insecure-ignore-tlog --type
+https://slsa.dev/provenance/v1` using the provisioned immutable public verification key
+(currently RELEASE3 for the RHTL/Pulp route) against the exact acquired `downloads/` sdist, never the normalized output.
+
+`metadata.dsse.json` is signed by Lightwell whenever a signing key (`sign_key`)
+is configured. There is no signed final Git tree hash: adding metadata and
+attestation files changes the Git tree, so the signed binding is the normalized
+archive and evidence closure instead. Final `metadata.json` records that closure in
+`predicate.buildDefinition.resolvedDependencies`: each member has a deterministic
+local mirror URI, SHA-256, and role annotation. The closure includes the
+Lightwell origin/transformation records, acquired and normalized archives, and
+the applicable RHTL PEP 691/PEP 740/adapted DSSE evidence (or only PEP 691
+evidence when provenance was not advertised). PyPI metadata does not claim RHTL
+evidence.
+
+### Provenance Artifact Distinctions
+
+To avoid conflation between native assertions and relayed upstream evidence:
+- `.lightwell/provenance.dsse.json`: Standard in-toto DSSE attestation envelope for source provenance:
+  - For PyPI: Native Lightwell attestation over the normalized archive, signed by Lightwell's own key (`sign_key`). Emitted only when signing is enabled.
+  - For RHTL: Representation-only adaptation of upstream RHTL PEP 740 attestation over the exact acquired sdist in `downloads/` (signed upstream by RELEASE3, never re-signed by Lightwell, and retained beside its raw `provenance.pep740.json`), verified against the acquired sdist before publish.
+- `.lightwell/metadata.dsse.json`: Native Lightwell attestation signing `metadata.json`, emitted whenever signing is enabled.
+
+### Mirror Repository Storage Note
+
+Committing both the original acquired sdist (`.lightwell/downloads/`) and the
+normalized sdist (`.lightwell/`) into the Git mirror repository guarantees a
+self-contained, offline-verifiable closure where every dependency is locally
+digest-bound. Because compressed tar archives are opaque to Git delta
+compression, forge operators should account for repository disk growth roughly
+linear with archive size across versions and republishes.
 
 ## Fail-closed requirements
 

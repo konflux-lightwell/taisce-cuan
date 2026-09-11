@@ -81,7 +81,7 @@ spec:
       type: string
       default: "false"
     - name: signingSecretName
-      description: Name of secret containing SIGN_KEY and/or cosign signing credentials (optional).
+      description: Name of secret containing SIGN_KEY, PUBLIC_KEY, and/or cosign credentials (optional).
       type: string
       default: konflux-cosign-signing-production
     - name: gitSecretName
@@ -309,6 +309,21 @@ spec:
               export "${secret_key}=$(cat "${secret_file}")"
             fi
           done
+        fi
+
+        # The provisioned public verification key is Secret data, not a
+        # command-line value. Materialize it as a short-lived file because
+        # cosign --key accepts a file path or key URI.
+        PUBLIC_KEY_FILE=""
+        trap 'rm -f "${PUBLIC_KEY_FILE:-}"' EXIT
+        if [ -n "${PUBLIC_KEY:-}" ]; then
+          PUBLIC_KEY_FILE="$(mktemp)"
+          printf '%s' "${PUBLIC_KEY}" > "${PUBLIC_KEY_FILE}"
+          ARGS+=("--public-key=${PUBLIC_KEY_FILE}")
+        elif [ -f "/etc/signing-secret/public.pem" ]; then
+          ARGS+=("--public-key=/etc/signing-secret/public.pem")
+        elif [ -f "/etc/signing-secret/cosign.pub" ]; then
+          ARGS+=("--public-key=/etc/signing-secret/cosign.pub")
         fi
 
         if [ -n "${SIGN_KEY:-}" ]; then

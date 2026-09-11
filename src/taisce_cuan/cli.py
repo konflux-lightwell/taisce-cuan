@@ -59,6 +59,7 @@ def create_parser() -> argparse.ArgumentParser:
     push_parser.add_argument("--committer-email", required=True, help="Git author and committer email")
     push_parser.add_argument("--allow-overwrite", "--overwrite", action="store_true", help="Allow updating existing tag with different content")
     push_parser.add_argument("--sign-key", default=os.getenv("SIGN_KEY"), help="Path or KMS key ID for cosign attestation signing")
+    push_parser.add_argument("--public-key", default=os.getenv("PUBLIC_KEY"), help="Immutable public verification key for RHTL provenance verification")
     push_parser.add_argument("--provenance-path", type=Path, help="Explicit file path where signed provenance should be written")
     push_parser.add_argument("--dry-run", action="store_true", help="Do not push to remote")
 
@@ -120,6 +121,7 @@ def handle_push(args: argparse.Namespace) -> int:
             allow_overwrite=args.allow_overwrite,
             sign_key=args.sign_key,
             provenance_path=args.provenance_path,
+            public_key=args.public_key,
             dry_run=args.dry_run,
         )
         logger.info(f"Successfully published {package} {version} with tag {tag_name}")
