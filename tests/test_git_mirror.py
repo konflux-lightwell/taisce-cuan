@@ -2,6 +2,8 @@ import json
 import subprocess
 import tarfile
 from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 
 from taisce_cuan.git_mirror import GitMirrorPublisher
@@ -271,6 +273,54 @@ def test_sign_attestation_fail_closed(tmp_path: Path):
     # When sign_key is a non-existent file path -> fails closed with ValueError
     with pytest.raises(ValueError, match="does not exist"):
         publisher.sign_attestation(metadata, source_file, "/non/existent/key.pem", out_prov)
+
+
+def test_sign_attestation_uses_configured_cosign_policy(monkeypatch, tmp_path: Path):
+    source_file = create_sample_source(tmp_path, "cosign-policy", "1.0.0")
+    output_file = tmp_path / "metadata.dsse"
+    key_file = tmp_path / "cosign.key"
+    key_file.write_text("test key")
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com",
+        group="testgroup",
+        committer_name="test",
+        committer_email="test@example.com",
+    )
+    metadata = IngestionMetadata(
+        subject=[Subject(name="cosign-policy-1.0.0.tar.gz", digest={"sha256": "0" * 64})],
+        predicate=Predicate(
+            buildDefinition=BuildDefinition(
+                externalParameters=ExternalParameters(
+                    package="cosign-policy",
+                    canonical_name="cosign-policy",
+                    version="1.0.0",
+                ),
+            ),
+            runDetails=RunDetails(
+                builder=Builder(),
+                metadata=RunDetailsMetadata(
+                    startedOn="2026-09-11T00:00:00Z",
+                    finishedOn="2026-09-11T00:00:00Z",
+                ),
+            ),
+        ),
+    )
+    captured: list[str] = []
+
+    monkeypatch.setattr("taisce_cuan.git_mirror.shutil.which", lambda name: "/usr/local/bin/cosign")
+
+    def fake_run(command, **_kwargs):
+        captured.extend(command)
+        output_file.write_text("attestation")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr("taisce_cuan.git_mirror.subprocess.run", fake_run)
+
+    assert publisher.sign_attestation(metadata, source_file, str(key_file), output_file) == output_file
+    assert "--tlog-upload=false" not in captured
+    assert "--type=https://slsa.dev/provenance/v1" in captured
+    assert f"--key={key_file}" in captured
+    assert f"--output-file={output_file}" in captured
 
 
 def test_baseline_tag_preservation_and_overwrite(tmp_path: Path):
