@@ -188,7 +188,7 @@ def test_rhtl_malformed_provenance_raises_error(tmp_path: Path, invalid_prov):
     assert not (tmp_path / "source-origin.json").exists()
 
 
-def test_git_mirror_advertised_rhtl_evidence_digest_validation(tmp_path: Path):
+def test_git_mirror_advertised_rhtl_evidence_digest_validation(tmp_path: Path, monkeypatch):
     carrier = tmp_path / "carrier"
     downloads = carrier / "downloads"
     downloads.mkdir(parents=True)
@@ -202,7 +202,8 @@ def test_git_mirror_advertised_rhtl_evidence_digest_validation(tmp_path: Path):
 
     archive = sdist.read_bytes()
     archive_sha = hashlib.sha256(archive).hexdigest()
-    prov_bytes = b'{"subject":"upstream"}\n'
+    prov_bytes = json.dumps({"attestation_bundles": [{"attestations": [{"envelope": {
+        "statement": "cGF5bG9hZA==", "signature": "c2ln"}}]}]}).encode() + b"\n"
     prov_sha = hashlib.sha256(prov_bytes).hexdigest()
     index_bytes = b'{"files":[]}\n'
     index_sha = hashlib.sha256(index_bytes).hexdigest()
@@ -238,6 +239,7 @@ def test_git_mirror_advertised_rhtl_evidence_digest_validation(tmp_path: Path):
     normalized_sdist = carrier / "demo-1.0.tar.gz"
     normalized_sdist.write_bytes(archive)
 
+    monkeypatch.setattr(GitMirrorPublisher, "verify_blob_attestation", staticmethod(lambda *args: None))
     publisher = GitMirrorPublisher(forge_url="https://forge.example.com", group="testgroup")
 
     # If rhtl-index.pep691.json is tampered, publish_source must fail closed
