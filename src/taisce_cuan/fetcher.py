@@ -62,6 +62,9 @@ class SdistFetcher:
         self.pypi_api_url = pypi_api_url.rstrip("/")
         self._client = client or httpx.Client(timeout=30.0, follow_redirects=True)
         self.max_download_bytes = max_download_bytes
+        self._reset_state()
+
+    def _reset_state(self) -> None:
         self.last_rhtl_index: Optional[bytes] = None
         self.last_rhtl_url: Optional[str] = None
         self.last_rhtl_status: Optional[int] = None
@@ -86,12 +89,18 @@ class SdistFetcher:
             pattern = re.compile(rf"^{re.escape(canonical).replace('-', '[-_.]')}-{re.escape(version)}\.tar\.gz$", re.I)
             for entry in data.get("files", []):
                 if pattern.match(entry.get("filename", "")):
-                    provenance = entry.get("provenance") if "provenance" in entry else None
+                    provenance = entry.get("provenance")
                     if provenance is None:
                         self.last_rhtl_reason = "not-advertised"
+                    elif not isinstance(provenance, str) or not provenance.strip():
+                        raise ValueError(f"Invalid provenance URL in RHTL index: {provenance!r}")
+                    else:
+                        _https(provenance)
                     return SdistSourceInfo("rhtl", entry["url"], entry.get("hashes", {}).get("sha256", ""),
                                            entry.get("size", 0), entry.get("upload-time"), provenance)
             self.last_rhtl_reason = "not-advertised"
+        except ValueError:
+            raise
         except Exception as exc:
             self.last_rhtl_reason = "unavailable"
             logger.warning("Error querying RHTL for %s %s: %s", package, version, exc)
@@ -150,32 +159,45 @@ class SdistFetcher:
                           "path": f"downloads/{canonicalize_name(package)}-{version}.tar.gz"},
             "provenance": {"mode": "pypi" if selected.registry == "pypi.org" else "rhtl"},
         }
+        evidence_path = root / "rhtl-index.pep691.json"
+        evidence_present = evidence_path.is_file()
+        evidence = {
+            "path": "rhtl-index.pep691.json" if evidence_present else None,
+            "reason": self.last_rhtl_reason,
+            "sha256": compute_sha256(evidence_path) if evidence_present else None,
+            "status": self.last_rhtl_status,
+            "url": self.last_rhtl_url,
+        }
         if selected.registry == "rhtl":
             if selected.provenance_url is not None:
-                origin["provenance"].update({"advertised": True, "url": selected.provenance_url,
-                    "status": "advertised", "sha256": self.last_advertised_provenance_sha256,
-                    "reference": "provenance.pep740.json", "path": "provenance.pep740.json",
+                origin["provenance"].update({
+                    "advertised": True,
                     "http_status": self.last_advertised_provenance_status,
-                    "remote_url": self.last_advertised_provenance_remote_url or selected.provenance_url})
+                    "path": "provenance.pep740.json",
+                    "reference": "provenance.pep740.json",
+                    "remote_url": self.last_advertised_provenance_remote_url or selected.provenance_url,
+                    "sha256": self.last_advertised_provenance_sha256,
+                    "status": "advertised",
+                    "url": selected.provenance_url,
+                })
+                origin["provenance"]["rhtl"] = {"status": "advertised", "evidence": evidence}
             else:
-                origin["provenance"].update({"advertised": False, "url": None, "status": "not-advertised",
-                    "sha256": None, "reference": "rhtl-index.pep691.json", "path": "rhtl-index.pep691.json"})
-                evidence_path = root / "rhtl-index.pep691.json"
-                origin["provenance"]["rhtl"] = {"status": "not-advertised", "evidence": {
-                    "url": self.last_rhtl_url, "status": self.last_rhtl_status, "reason": self.last_rhtl_reason,
-                    "sha256": compute_sha256(evidence_path) if evidence_path.exists() else None,
-                    "path": "rhtl-index.pep691.json"}}
+                origin["provenance"].update({
+                    "advertised": False,
+                    "path": "rhtl-index.pep691.json",
+                    "reference": "rhtl-index.pep691.json",
+                    "sha256": None,
+                    "status": "not-advertised",
+                    "url": None,
+                })
+                origin["provenance"]["rhtl"] = {"status": "not-advertised", "evidence": evidence}
         else:
-            evidence_path = root / "rhtl-index.pep691.json"
-            evidence = {"url": self.last_rhtl_url, "status": self.last_rhtl_status,
-                        "reason": self.last_rhtl_reason,
-                        "sha256": compute_sha256(evidence_path) if evidence_path.exists() else None,
-                        "path": "rhtl-index.pep691.json"}
             origin["provenance"]["rhtl"] = {"status": "not-advertised", "evidence": evidence}
         (root / "source-origin.json").write_text(json.dumps(origin, sort_keys=True, separators=(",", ":")) + "\n")
 
     def fetch(self, package: str, version: str, output_dir: Path, registries: Optional[list[str] | str] = None,
               rhtl_only: bool = False) -> tuple[Path, SdistSourceInfo, Optional[SdistSourceInfo]]:
+        self._reset_state()
         if isinstance(registries, str): req = [x.strip().lower() for x in registries.split(",") if x.strip()]
         elif registries is not None: req = [x.strip().lower() for x in registries if x.strip()]
         else: req = ["rhtl"] if rhtl_only else ["rhtl", "pypi.org"]
@@ -195,16 +217,15 @@ class SdistFetcher:
             (root / "rhtl-index.pep691.json").write_bytes(self.last_rhtl_index)
         if selected.provenance_url is not None:
             _https(selected.provenance_url)
-            _https(selected.provenance_url)
             response = self._client.get(selected.provenance_url)
+            self.last_advertised_provenance_status = response.status_code
+            self.last_advertised_provenance_remote_url = str(response.url)
             response.raise_for_status()
             if urlparse(str(response.url)).scheme.lower() != "https": raise ValueError("provenance request redirected away from TLS")
             body = response.content
             if len(body) > self.max_download_bytes: raise ValueError("provenance exceeds configured size bound")
             self.last_advertised_provenance = body
             self.last_advertised_provenance_sha256 = hashlib.sha256(body).hexdigest()
-            self.last_advertised_provenance_status = response.status_code
-            self.last_advertised_provenance_remote_url = str(response.url)
             (root / "provenance.pep740.json").write_bytes(body)
         elif selected.registry == "rhtl":
             (root / "provenance.pep740.json").unlink(missing_ok=True)

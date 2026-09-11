@@ -50,10 +50,14 @@ RHTL provenance, `provenance.path` and `provenance.reference` are both
 `provenance.pep740.json`, `provenance.sha256` is the SHA-256 of those exact
 bytes, `provenance.url` is the advertised URL, `provenance.http_status` is the
 validated HTTP status, and `provenance.remote_url` records the final URL after
-HTTP redirects separately. For omitted or null RHTL provenance,
-`provenance.path`, `provenance.reference`, and `provenance.rhtl.evidence.path`
-are `rhtl-index.pep691.json`; the nested evidence records its exact `sha256`,
-index `url`, HTTP `status`, and `reason: not-advertised`. A present but invalid
+HTTP redirects separately; the nested `provenance.rhtl.evidence` binds the
+carried `rhtl-index.pep691.json` with its exact `sha256`, index `url`, and HTTP
+`status`. For omitted or null RHTL provenance, `provenance.path`,
+`provenance.reference`, and `provenance.rhtl.evidence.path` are
+`rhtl-index.pep691.json`; the nested evidence records its exact `sha256`, index
+`url`, HTTP `status`, and `reason: not-advertised`. When RHTL is not queried
+(e.g. PyPI-only acquisition), no RHTL evidence file is present on disk, and
+`provenance.rhtl.evidence.path` and `sha256` remain null. A present but invalid
 provenance value is an acquisition error, not the not-advertised state.
 
 ## Normalized carrier
