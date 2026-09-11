@@ -55,6 +55,9 @@ spec:
     - name: workdir
       emptyDir: {}
   stepTemplate:
+    env:
+      - name: HOME
+        value: /tekton/home
     volumeMounts:
       - mountPath: /var/workdir
         name: workdir
@@ -71,9 +74,6 @@ spec:
         requests:
           memory: 128Mi
           cpu: 50m
-      env:
-        - name: HOME
-          value: /tekton/home
       script: |
         #!/usr/bin/env bash
         set -euo pipefail
