@@ -78,7 +78,7 @@ spec:
         #!/usr/bin/env bash
         set -euo pipefail
 
-        SDISTS_DIR="/var/workdir/sdists-repo/downloads"
+        SDISTS_DIR="/var/workdir/sdists-repo"
         mkdir -p "${SDISTS_DIR}"
 
         taisce-cuan fetch "$(params.packageName)" "$(params.packageVersion)" \
