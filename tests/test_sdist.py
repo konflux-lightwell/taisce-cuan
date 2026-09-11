@@ -96,14 +96,17 @@ def test_extract_zip_sdist_and_zip_slip_prevention(tmp_path: Path):
 def test_fetcher_missing_sha256_fail_closed(tmp_path: Path):
     from taisce_cuan.fetcher import SdistFetcher, SdistSourceInfo
     fetcher = SdistFetcher()
-    # Mock query_rhtl returning entry with empty sha256
-    fetcher.query_rhtl = lambda pkg, ver: SdistSourceInfo(
-        registry="rhtl",
-        download_url="https://example.com/foo.tar.gz",
-        sha256="",
-        size=100,
-        upload_time=None,
-        provenance_url=None,
+    # Mock query_rhtl returning (entry with empty sha256, raw index bytes)
+    fetcher.query_rhtl = lambda pkg, ver: (
+        SdistSourceInfo(
+            registry="rhtl",
+            download_url="https://example.com/foo.tar.gz",
+            sha256="",
+            size=100,
+            upload_time=None,
+            provenance_url=None,
+        ),
+        None,
     )
     with pytest.raises(ValueError, match="No SHA-256 digest provided"):
         fetcher.fetch("foo", "1.0.0", tmp_path, registries="rhtl")
