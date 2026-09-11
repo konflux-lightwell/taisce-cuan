@@ -31,16 +31,22 @@ def create_sample_source(path: Path, pkg_name: str, version: str, filename: str 
 
     import hashlib
     source_sha256 = hashlib.sha256(source_file.read_bytes()).hexdigest()
+    downloads = carrier_root / "downloads"
+    downloads.mkdir()
+    original = downloads / fn
+    original.write_bytes(source_file.read_bytes())
+    original_sha256 = hashlib.sha256(original.read_bytes()).hexdigest()
     (carrier_root / "source-origin.json").write_text(json.dumps({
         "schema": "https://lightwell.dev/schemas/source-origin/v1",
-        "acquired": {"registry": "pypi.org", "sha256": source_sha256,
+        "acquired": {"registry": "pypi.org", "sha256": original_sha256, "path": f"downloads/{fn}",
                      "package": pkg_name, "version": version},
         "provenance": {"mode": "pypi", "rhtl": {"status": "not-advertised"}},
     }, sort_keys=True) + "\n")
     (carrier_root / "sdist-transformation.json").write_text(json.dumps({
         "schema": "https://lightwell.dev/schemas/sdist-transformation/v1",
-        "input": {"sha256": source_sha256},
-        "output": {"sha256": source_sha256},
+        "input": {"sha256": original_sha256},
+        "output": {"sha256": source_sha256, "path": fn},
+        "source_origin_sha256": hashlib.sha256((carrier_root / "source-origin.json").read_bytes()).hexdigest(),
         "transformation": "normalized-sdist",
     }, sort_keys=True) + "\n")
     return source_file
@@ -77,7 +83,8 @@ def test_git_mirror_publisher_dry_run(tmp_path: Path):
     meta = json.loads((repo_dir / ".lightwell" / "metadata.json").read_text())
     assert meta["predicate"]["buildDefinition"]["buildType"] == "https://lightwell.dev/buildTypes/python-source-ingest/v1"
     assert meta["predicate"]["buildDefinition"]["externalParameters"]["canonical_name"] == "sample"
-    assert meta["subject"][1]["digest"]["gitTree"] != "pending"
+    assert len(meta["subject"]) == 1
+    assert "gitTree" not in meta["subject"][0]["digest"]
 
     # Verify custom git committer config
     user_name = subprocess.check_output(["git", "config", "user.name"], cwd=repo_dir, text=True).strip()
@@ -520,6 +527,24 @@ def test_provenance_carrier_is_published_with_normalized_sdist(tmp_path: Path):
     assert transformation["input"]["sha256"] == origin["acquired"]["sha256"]
     assert transformation["output"]["sha256"] == origin["acquired"]["sha256"]
     assert not (repo_dir / ".lightwell" / "provenance.json").exists()
+
+
+def test_legacy_provenance_is_not_converted_or_published(tmp_path: Path):
+    source_file = create_sample_source(tmp_path, "legacy-provenance", "1.0.0")
+    legacy = source_file.parent / "sdist-provenance.json"
+    legacy.write_text('{"statement":"legacy attestation"}\n')
+    workspace = tmp_path / "workspace"
+    GitMirrorPublisher(forge_url="https://forge.example.com", group="testgroup").publish_source(
+        source_path=source_file,
+        package="legacy-provenance",
+        version="1.0.0",
+        workspace_dir=workspace,
+        dry_run=True,
+    )
+    lightwell = workspace / "pypi.org-legacy-provenance" / ".lightwell"
+    assert not (lightwell / "provenance.json").exists()
+    assert not (lightwell / "provenance.dsse").exists()
+    assert not (lightwell / "metadata.dsse").exists()
 
 
 def test_cli_push_auto_discover_metadata(tmp_path: Path):
