@@ -209,9 +209,15 @@ class GitMirrorPublisher:
         """Adapt an RHTL PEP 740 envelope without decoding its signed values."""
         try:
             document = json.loads(raw_path.read_bytes())
-            envelope = document["attestation_bundles"][0]["attestations"][0]["envelope"]
-            payload = envelope["statement"]
-            signature = envelope["signature"]
+            bundles = document.get("attestation_bundles")
+            if not isinstance(bundles, list) or len(bundles) != 1:
+                raise ValueError("RHTL PEP 740 evidence must contain exactly one attestation bundle")
+            attestations = bundles[0].get("attestations")
+            if not isinstance(attestations, list) or len(attestations) != 1:
+                raise ValueError("RHTL PEP 740 evidence must contain exactly one attestation")
+            envelope = attestations[0].get("envelope", {})
+            payload = envelope.get("statement")
+            signature = envelope.get("signature")
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
             raise ValueError("RHTL PEP 740 evidence is malformed") from exc
         if not isinstance(payload, str) or not isinstance(signature, str) or not payload or not signature:
@@ -225,7 +231,12 @@ class GitMirrorPublisher:
         return output_path
 
     @staticmethod
-    def verify_blob_attestation(source_file: Path, signature_file: Path, public_key: str) -> None:
+    def verify_blob_attestation(
+        source_file: Path,
+        signature_file: Path,
+        public_key: str,
+        predicate_type: str = "https://slsa.dev/provenance/v1",
+    ) -> None:
         """Verify a Cosign DSSE blob, failing closed before any publication."""
         key = (public_key or "").strip()
         if not key:
@@ -237,7 +248,7 @@ class GitMirrorPublisher:
             raise RuntimeError("Cosign CLI is required for attestation verification")
         result = subprocess.run([
             cosign_bin, "verify-blob-attestation", "--insecure-ignore-tlog",
-            "--type", "https://slsa.dev/provenance/v1", "--key", key,
+            "--type", predicate_type, "--key", key,
             "--signature", str(signature_file), str(source_file),
         ], capture_output=True, text=True, check=False)
         if result.returncode != 0:
@@ -503,7 +514,8 @@ class GitMirrorPublisher:
         shutil.copyfile(original_archive, final_downloads / original_archive.name)
         normalized_archive = lightwell_dir / source_path.name
         shutil.copyfile(source_path, normalized_archive)
-        if source_registry == "rhtl":
+        (lightwell_dir / "metadata.dsse").unlink(missing_ok=True)
+        if source_registry in {"rhtl", "packages.redhat.com"}:
             (lightwell_dir / "provenance.dsse").unlink(missing_ok=True)
         metadata_file = lightwell_dir / "metadata.json"
 
@@ -593,8 +605,19 @@ class GitMirrorPublisher:
             )
             if metadata_attestation is None:
                 raise RuntimeError("metadata signing is required when a signing key is configured")
-            self.verify_blob_attestation(metadata_file, metadata_attestation, sign_key)
-            if source_registry != "rhtl":
+            # Self-verify the newly signed metadata attestation if a public verification key
+            # or KMS reference is available. Local private-key files cannot be loaded by
+            # cosign verify-blob-attestation --key without their public counterpart.
+            verification_key = None
+            if sign_key.startswith(("awskms://", "k8s://", "gcpkms://", "azurekms://", "vault://")):
+                verification_key = sign_key
+            else:
+                candidate_pub = Path(sign_key).with_suffix(".pub")
+                if candidate_pub.is_file():
+                    verification_key = str(candidate_pub)
+            if verification_key:
+                self.verify_blob_attestation(metadata_file, metadata_attestation, verification_key)
+            if source_registry not in {"rhtl", "packages.redhat.com"}:
                 self.sign_attestation(
                     metadata=metadata,
                     source_file=source_path,
@@ -604,8 +627,10 @@ class GitMirrorPublisher:
 
         # Git stage and commit initial state
         subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
-        commit_msg = f"ingest: {canonical} {version} from {source_registry}\n\nsha256: {source_sha256}"
-        subprocess.run(["git", "commit", "-m", commit_msg], cwd=repo_dir, check=True)
+        has_staged = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=repo_dir).returncode != 0
+        if has_staged:
+            commit_msg = f"ingest: {canonical} {version} from {source_registry}\n\nsha256: {source_sha256}"
+            subprocess.run(["git", "commit", "-m", commit_msg], cwd=repo_dir, check=True)
 
         # Tag creation
         tag_flag = ["-f"] if allow_overwrite else []

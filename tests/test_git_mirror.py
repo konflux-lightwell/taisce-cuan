@@ -251,6 +251,22 @@ def test_rhtl_pep740_adaptation_preserves_base64_and_rejects_malformed(tmp_path:
     raw.write_text("{malformed")
     with pytest.raises(ValueError, match="malformed"):
         GitMirrorPublisher.adapt_rhtl_pep740(raw, output)
+    # Rejects multiple bundles
+    raw.write_text(json.dumps({"attestation_bundles": [
+        {"attestations": [{"envelope": {"statement": payload, "signature": signature}}]},
+        {"attestations": [{"envelope": {"statement": payload, "signature": signature}}]},
+    ]}))
+    with pytest.raises(ValueError, match="bundle"):
+        GitMirrorPublisher.adapt_rhtl_pep740(raw, output)
+    # Rejects multiple attestations in a bundle
+    raw.write_text(json.dumps({"attestation_bundles": [
+        {"attestations": [
+            {"envelope": {"statement": payload, "signature": signature}},
+            {"envelope": {"statement": payload, "signature": signature}},
+        ]},
+    ]}))
+    with pytest.raises(ValueError, match="attestation"):
+        GitMirrorPublisher.adapt_rhtl_pep740(raw, output)
 
 
 def test_verify_blob_attestation_targets_acquired_and_never_resigns(monkeypatch, tmp_path: Path):
@@ -264,7 +280,30 @@ def test_verify_blob_attestation_targets_acquired_and_never_resigns(monkeypatch,
     GitMirrorPublisher.verify_blob_attestation(source, signature, str(key))
     assert captured[0][1] == "verify-blob-attestation"
     assert captured[0][-1] == str(source)
+    assert "--key" in captured[0]
+    assert str(key) in captured[0]
+    assert "--signature" in captured[0]
+    assert str(signature) in captured[0]
+    assert "--type" in captured[0]
+    assert "https://slsa.dev/provenance/v1" in captured[0]
     assert "attest-blob" not in captured[0]
+
+    # Fails closed on missing or empty key
+    with pytest.raises(ValueError, match="public verification key is required"):
+        GitMirrorPublisher.verify_blob_attestation(source, signature, "")
+    with pytest.raises(ValueError, match="does not exist or is not a file"):
+        GitMirrorPublisher.verify_blob_attestation(source, signature, "/non/existent/key.pub")
+
+    # Fails closed if cosign CLI binary is missing
+    monkeypatch.setattr("taisce_cuan.git_mirror.shutil.which", lambda _: None)
+    with pytest.raises(RuntimeError, match="Cosign CLI is required"):
+        GitMirrorPublisher.verify_blob_attestation(source, signature, str(key))
+
+    # Fails closed if cosign returns non-zero exit code
+    monkeypatch.setattr("taisce_cuan.git_mirror.shutil.which", lambda _: "/bin/cosign")
+    monkeypatch.setattr("taisce_cuan.git_mirror.subprocess.run", lambda *args, **kwargs: SimpleNamespace(returncode=1, stderr="signature verification failed"))
+    with pytest.raises(RuntimeError, match="cosign verify-blob-attestation failed"):
+        GitMirrorPublisher.verify_blob_attestation(source, signature, str(key))
 
 
 def test_sign_attestation_fail_closed(tmp_path: Path):
@@ -690,5 +729,141 @@ def test_cli_push_auto_discover_metadata(tmp_path: Path):
     assert '"version": "3.2.1"' in metadata_file.read_text()
 
 
+def test_publish_source_signing_and_legacy_unlinking(tmp_path: Path, monkeypatch):
+    source_file = create_sample_source(tmp_path, "signed-pkg", "1.0.0")
+    workspace = tmp_path / "workspace"
+    repo_dir = workspace / "pypi.org-signed-pkg"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    lightwell_dir = repo_dir / ".lightwell"
+    lightwell_dir.mkdir(parents=True, exist_ok=True)
+    legacy_envelope = lightwell_dir / "metadata.dsse"
+    legacy_envelope.write_text('{"stale": true}\n')
 
+    key_file = tmp_path / "signing.key"
+    key_file.write_text("private key bytes")
+    pub_file = tmp_path / "signing.pub"
+    pub_file.write_text("public key bytes")
+
+    monkeypatch.setattr("taisce_cuan.git_mirror.shutil.which", lambda _: "/bin/cosign")
+
+    verify_calls = []
+    real_run = subprocess.run
+
+    def fake_run(command, **kwargs):
+        if command[0] != "/bin/cosign":
+            return real_run(command, **kwargs)
+        if command[1] == "attest-blob":
+            out_arg = [arg for arg in command if arg.startswith("--output-file=")][0]
+            out_path = Path(out_arg.split("=", 1)[1])
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text('{"signed": true}\n')
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if command[1] == "verify-blob-attestation":
+            verify_calls.append(command)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("taisce_cuan.git_mirror.subprocess.run", fake_run)
+
+    publisher = GitMirrorPublisher(forge_url="https://forge.example.com", group="testgroup")
+    publisher.publish_source(
+        source_path=source_file,
+        package="signed-pkg",
+        version="1.0.0",
+        workspace_dir=workspace,
+        source_registry="pypi.org",
+        sign_key=str(key_file),
+        dry_run=True,
+    )
+
+    # Legacy metadata.dsse must be unlinked
+    assert not legacy_envelope.exists()
+    assert (lightwell_dir / "metadata.dsse.json").exists()
+    assert (lightwell_dir / "provenance.dsse").exists()
+
+    # Verification must be called with public key, never private key
+    assert len(verify_calls) == 1
+    assert verify_calls[0][1] == "verify-blob-attestation"
+    key_idx = verify_calls[0].index("--key")
+    assert verify_calls[0][key_idx + 1] == str(pub_file)
+
+    # If only private key is provided without .pub, publish succeeds without crash
+    source_file_nopub = create_sample_source(tmp_path, "signed-pkg-nopub", "1.0.0")
+    pub_file.unlink()
+    verify_calls.clear()
+    publisher.publish_source(
+        source_path=source_file_nopub,
+        package="signed-pkg-nopub",
+        version="1.0.0",
+        workspace_dir=workspace,
+        source_registry="pypi.org",
+        sign_key=str(key_file),
+        dry_run=True,
+    )
+    assert len(verify_calls) == 0
+
+
+def test_publish_source_rhtl_verification_fail_closed_and_opaque(tmp_path: Path, monkeypatch):
+    source_file = create_sample_source(tmp_path, "rhtl-gate-pkg", "2.0.0")
+    carrier = source_file.parent
+    origin_path = carrier / "source-origin.json"
+    origin = json.loads(origin_path.read_text())
+    origin["acquired"]["registry"] = "rhtl"
+    origin["provenance"] = {"mode": "rhtl", "advertised": True, "sha256": "placeholder"}
+    raw = carrier / "provenance.pep740.json"
+    raw.write_text(json.dumps({"attestation_bundles": [{"attestations": [{"envelope": {
+        "statement": "cGF5bG9hZA==", "signature": "c2ln"}}]}]}))
+    import hashlib
+    origin["provenance"]["sha256"] = hashlib.sha256(raw.read_bytes()).hexdigest()
+    origin_path.write_text(json.dumps(origin, sort_keys=True) + "\n")
+    trans_path = carrier / "sdist-transformation.json"
+    trans = json.loads(trans_path.read_text())
+    trans["source_origin_sha256"] = hashlib.sha256(origin_path.read_bytes()).hexdigest()
+    trans_path.write_text(json.dumps(trans, sort_keys=True) + "\n")
+
+    pub_key_file = tmp_path / "release3.pub"
+    pub_key_file.write_text("release3 public key")
+
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(forge_url="https://forge.example.com", group="testgroup")
+
+    # 1. Missing public_key must fail closed
+    with pytest.raises(ValueError, match="public verification key is required"):
+        publisher.publish_source(
+            source_path=source_file, package="rhtl-gate-pkg", version="2.0.0",
+            workspace_dir=workspace, source_registry="rhtl", public_key=None, dry_run=True,
+        )
+
+    # 2. cosign verify failure must fail closed
+    monkeypatch.setattr("taisce_cuan.git_mirror.shutil.which", lambda _: "/bin/cosign")
+    real_run = subprocess.run
+
+    def cosign_fail(command, **kwargs):
+        if command[0] == "/bin/cosign":
+            return SimpleNamespace(returncode=1, stdout="", stderr="signature check failed")
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr("taisce_cuan.git_mirror.subprocess.run", cosign_fail)
+    with pytest.raises(RuntimeError, match="cosign verify-blob-attestation failed"):
+        publisher.publish_source(
+            source_path=source_file, package="rhtl-gate-pkg", version="2.0.0",
+            workspace_dir=workspace, source_registry="rhtl", public_key=str(pub_key_file), dry_run=True,
+        )
+
+    # 3. Successful verification: adapted DSSE published, RHTL evidence remains opaque (no provenance.dsse)
+    def cosign_ok(command, **kwargs):
+        if command[0] == "/bin/cosign":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr("taisce_cuan.git_mirror.subprocess.run", cosign_ok)
+    publisher.publish_source(
+        source_path=source_file, package="rhtl-gate-pkg", version="2.0.0",
+        workspace_dir=workspace, source_registry="rhtl", public_key=str(pub_key_file), dry_run=True,
+    )
+    repo = workspace / "pypi.org-rhtl-gate-pkg"
+    lightwell = repo / ".lightwell"
+    assert (lightwell / "provenance.pep740.json").exists()
+    assert (lightwell / "provenance.dsse.json").exists()
+    assert not (lightwell / "provenance.dsse").exists()
 

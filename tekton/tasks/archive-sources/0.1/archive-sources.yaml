@@ -315,13 +315,16 @@ spec:
         # command-line value. Materialize it as a short-lived file because
         # cosign --key accepts a file path or key URI.
         PUBLIC_KEY_FILE=""
+        trap 'rm -f "${PUBLIC_KEY_FILE:-}"' EXIT
         if [ -n "${PUBLIC_KEY:-}" ]; then
-          umask 077
           PUBLIC_KEY_FILE="$(mktemp)"
           printf '%s' "${PUBLIC_KEY}" > "${PUBLIC_KEY_FILE}"
           ARGS+=("--public-key=${PUBLIC_KEY_FILE}")
+        elif [ -f "/etc/signing-secret/public.pem" ]; then
+          ARGS+=("--public-key=/etc/signing-secret/public.pem")
+        elif [ -f "/etc/signing-secret/cosign.pub" ]; then
+          ARGS+=("--public-key=/etc/signing-secret/cosign.pub")
         fi
-        trap 'rm -f "${PUBLIC_KEY_FILE:-}"' EXIT
 
         if [ -n "${SIGN_KEY:-}" ]; then
           ARGS+=("--sign-key=${SIGN_KEY}")
