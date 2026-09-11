@@ -22,9 +22,10 @@ import os
 import sys
 from pathlib import Path
 
-from taisce_cuan.fetcher import SdistFetcher
-from taisce_cuan.git_mirror import GitMirrorPublisher
+from taisce_cuan.provenance.attest import PublishSourceRequest
 from taisce_cuan.sdist import inspect_sdist_metadata
+from taisce_cuan.source.fetch import SdistSourceFetcher
+from taisce_cuan.source.mirror import GitMirrorPublisher
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("taisce-cuan")
@@ -68,7 +69,7 @@ def create_parser() -> argparse.ArgumentParser:
 
 
 def handle_fetch(args: argparse.Namespace) -> int:
-    fetcher = SdistFetcher()
+    fetcher = SdistSourceFetcher()
     output_dir = Path(args.output_dir)
     try:
         sdist_path, source_info, _ = fetcher.fetch(
@@ -114,7 +115,7 @@ def handle_push(args: argparse.Namespace) -> int:
     )
 
     try:
-        tag_name = publisher.publish_source(
+        request = PublishSourceRequest(
             source_path=source_path,
             package=package,
             version=version,
@@ -126,7 +127,8 @@ def handle_push(args: argparse.Namespace) -> int:
             rhtl_predicate_type=args.rhtl_predicate_type,
             dry_run=args.dry_run,
         )
-        logger.info(f"Successfully published {package} {version} with tag {tag_name}")
+        result = publisher.publish(request)
+        logger.info(f"Successfully published {package} {version} with tag {result.tag_name}")
         return 0
     except Exception as e:
         logger.error(f"Failed to publish {package} {version}: {e}")

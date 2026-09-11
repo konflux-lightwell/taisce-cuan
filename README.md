@@ -6,7 +6,7 @@
 
 In the Lightwell architecture (ADR-0020 & LTWL-5395):
 1. **`fetch`**: Resolves upstream Python sdists from RHTL (PEP 691 Simple Index) or PyPI, verifies SHA-256 hashes, and downloads the `.tar.gz` archive.
-2. **`push`**: Takes a source archive, unpacks it into a canonical repository tree, records `.lightwell/metadata.json` (SLSA Build Provenance inventory with git tree SHA), commits with SemVer branch topology, tags `<canonical-pkg>/<version>`, and pushes to the Git forge.
+2. **`push`**: Takes a source archive, unpacks it into a canonical repository tree, records `.lightwell/metadata.json` (SLSA Build Provenance inventory with the normalized sdist archive SHA-256 subject), commits with SemVer branch topology, tags `<canonical-pkg>/<version>`, and pushes to the Git forge.
 
 ## CLI Usage
 
