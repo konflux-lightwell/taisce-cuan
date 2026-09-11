@@ -26,7 +26,8 @@ downloads/
   <canonical-package>-<version>.tar.gz  # exact upstream-acquired sdist
 source-origin.json                      # Taisce acquisition record
 rhtl-index.pep691.json                  # RHTL only
-provenance.pep740.json                  # RHTL only; advertised provenance only
+provenance.pep740.json                  # exact raw RHTL response bytes
+provenance.dsse.json                     # adapted RHTL DSSE envelope (verified)
 ```
 
 `source-origin.json` binds the selected upstream artifact URL, declared and
@@ -34,7 +35,8 @@ verified SHA-256, and the relative `downloads/` path. For RHTL it also records
 one of these evidence states:
 
 - **advertised**: `provenance.pep740.json` is the exact response retrieved from
-the provenance URL advertised by the selected PEP 691 entry;
+the provenance URL advertised by the selected PEP 691 entry. The raw file is
+never parsed and rewritten or decoded; the adapted DSSE is a separate file;
 - **not advertised**: `rhtl-index.pep691.json` is the exact PEP 691 response
 showing that the selected entry did not advertise provenance;
 - **PyPI**: no RHTL evidence file is present.
@@ -91,20 +93,33 @@ sdist into `source/`, and writes:
 .lightwell/sdist-transformation.json
 ```
 
-For PyPI only it also writes a Lightwell-generated:
+For RHTL, the final mirror retains the raw upstream response and its separate
+adapted DSSE evidence:
 
 ```text
-.lightwell/provenance.dsse.json
+.lightwell/provenance.pep740.json       # exact raw advertised response
+.lightwell/provenance.dsse.json          # representation-only adaptation
 ```
 
-For RHTL, the final mirror instead retains exactly the applicable opaque
-upstream evidence:
+For an unadvertised RHTL response, it retains instead:
+
 
 ```text
 .lightwell/provenance.pep740.json       # advertised provenance
-# or
 .lightwell/rhtl-index.pep691.json       # provenance not advertised
 ```
+
+For PyPI, no upstream PEP 740 evidence is synthesized; its existing native
+Lightwell provenance behavior is unchanged.
+
+For advertised RHTL evidence, `provenance.dsse.json` is built only from the
+original base64 strings at `attestation_bundles[0].attestations[0].envelope`:
+`statement` becomes `payload` and `signature` becomes `signatures[0].sig`,
+with fixed payload type `application/vnd.in-toto+json`. It is verified with
+Cosign `verify-blob-attestation --insecure-ignore-tlog --type
+https://slsa.dev/provenance/v1` using the provisioned immutable RELEASE3 public
+key against the exact acquired `downloads/` sdist, never the normalized output.
+
 
 `metadata.dsse.json` is Lightwell-signed for every published route. There is
 no signed final Git tree hash: adding metadata and attestation files changes

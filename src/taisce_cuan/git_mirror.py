@@ -204,6 +204,45 @@ class GitMirrorPublisher:
             logger.debug(f"Error checking existing tag content for {tag_name}: {e}")
         return False
 
+    @staticmethod
+    def adapt_rhtl_pep740(raw_path: Path, output_path: Path) -> Path:
+        """Adapt an RHTL PEP 740 envelope without decoding its signed values."""
+        try:
+            document = json.loads(raw_path.read_bytes())
+            envelope = document["attestation_bundles"][0]["attestations"][0]["envelope"]
+            payload = envelope["statement"]
+            signature = envelope["signature"]
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+            raise ValueError("RHTL PEP 740 evidence is malformed") from exc
+        if not isinstance(payload, str) or not isinstance(signature, str) or not payload or not signature:
+            raise ValueError("RHTL PEP 740 envelope has invalid payload or signature")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps({
+            "payloadType": "application/vnd.in-toto+json",
+            "payload": payload,
+            "signatures": [{"sig": signature}],
+        }, separators=(",", ":")) + "\n")
+        return output_path
+
+    @staticmethod
+    def verify_blob_attestation(source_file: Path, signature_file: Path, public_key: str) -> None:
+        """Verify a Cosign DSSE blob, failing closed before any publication."""
+        key = (public_key or "").strip()
+        if not key:
+            raise ValueError("RELEASE3 public key is required for attestation verification")
+        if not key.startswith(("awskms://", "k8s://", "gcpkms://", "azurekms://", "vault://")) and not Path(key).is_file():
+            raise ValueError(f"Verification key '{key}' does not exist or is not a file")
+        cosign_bin = shutil.which("cosign")
+        if not cosign_bin:
+            raise RuntimeError("Cosign CLI is required for attestation verification")
+        result = subprocess.run([
+            cosign_bin, "verify-blob-attestation", "--insecure-ignore-tlog",
+            "--type", "https://slsa.dev/provenance/v1", "--key", key,
+            "--signature", str(signature_file), str(source_file),
+        ], capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise RuntimeError(f"cosign verify-blob-attestation failed (exit {result.returncode}): {result.stderr}")
+
     def sign_attestation(
         self,
         metadata: IngestionMetadata,
@@ -268,6 +307,7 @@ class GitMirrorPublisher:
         allow_overwrite: bool = False,
         sign_key: Optional[str] = None,
         provenance_path: Optional[Path] = None,
+        release3_public_key: Optional[str] = None,
         dry_run: bool = False,
     ) -> str:
         """Publish normalized source plus the fixed provenance carrier evidence."""
@@ -336,6 +376,13 @@ class GitMirrorPublisher:
                 evidence = carrier_root / evidence_name
                 if not evidence.is_file() or compute_sha256(evidence) != expected_digest:
                     raise ValueError(f"{evidence_name} does not match source-origin provenance digest")
+        raw_pep740 = carrier_root / "provenance.pep740.json"
+        adapted_pep740 = carrier_root / "provenance.dsse.json"
+        if source_registry in {"rhtl", "packages.redhat.com"} and raw_pep740.is_file():
+            self.adapt_rhtl_pep740(raw_pep740, adapted_pep740)
+            self.verify_blob_attestation(original_archive, adapted_pep740, release3_public_key or os.getenv("RELEASE3_PUBLIC_KEY", ""))
+        elif source_registry in {"rhtl", "packages.redhat.com"} and provenance.get("advertised"):
+            raise ValueError("advertised RHTL provenance evidence is missing")
         logger.info(f"Publishing {package} {version} ({source_sha256}) to {repo_name}")
 
         # Git init if repo not present
@@ -445,11 +492,10 @@ class GitMirrorPublisher:
         # Prepare .lightwell/metadata.json and preserve the fixed carrier evidence.
         lightwell_dir = repo_dir / ".lightwell"
         lightwell_dir.mkdir(exist_ok=True)
-        for evidence_name in ("source-origin.json", "sdist-transformation.json", "rhtl-index.pep691.json", "provenance.pep740.json"):
+        for evidence_name in ("source-origin.json", "sdist-transformation.json", "rhtl-index.pep691.json", "provenance.pep740.json", "provenance.dsse.json"):
             evidence = carrier_root / evidence_name
             if evidence.is_file():
                 shutil.copyfile(evidence, lightwell_dir / evidence_name)
-        # RHTL provenance is an advertised endpoint only; never emit provenance.dsse.
         if source_registry == "rhtl":
             (lightwell_dir / "provenance.dsse").unlink(missing_ok=True)
         metadata_file = lightwell_dir / "metadata.json"
@@ -503,12 +549,15 @@ class GitMirrorPublisher:
         # tree OID. Native metadata is signed on every route. Only PyPI gets a
         # Lightwell archive-provenance DSSE; RHTL evidence remains opaque.
         if sign_key:
-            self.sign_attestation(
+            metadata_attestation = self.sign_attestation(
                 metadata=metadata,
                 source_file=metadata_file,
                 sign_key=sign_key,
-                output_provenance_file=lightwell_dir / "metadata.dsse",
+                output_provenance_file=lightwell_dir / "metadata.dsse.json",
             )
+            if metadata_attestation is None:
+                raise RuntimeError("metadata signing is required when a signing key is configured")
+            self.verify_blob_attestation(metadata_file, metadata_attestation, sign_key)
             if source_registry != "rhtl":
                 self.sign_attestation(
                     metadata=metadata,
@@ -569,6 +618,7 @@ class GitMirrorPublisher:
         allow_overwrite: bool = False,
         sign_key: Optional[str] = None,
         provenance_path: Optional[Path] = None,
+        release3_public_key: Optional[str] = None,
         dry_run: bool = False,
     ) -> str:
         return self.publish_source(
@@ -582,5 +632,6 @@ class GitMirrorPublisher:
             allow_overwrite=allow_overwrite,
             sign_key=sign_key,
             provenance_path=provenance_path,
+            release3_public_key=release3_public_key,
             dry_run=dry_run,
         )
