@@ -236,6 +236,37 @@ def test_semver_branch_topology_backfill(tmp_path: Path):
     assert parent_count == 0
 
 
+def test_rhtl_pep740_adaptation_preserves_base64_and_rejects_malformed(tmp_path: Path):
+    raw = tmp_path / "provenance.pep740.json"
+    output = tmp_path / "provenance.dsse.json"
+    payload = "eyJwcmVjaXNlbHkiOiJub3QtZGVjb2RlZCJ9=="
+    signature = "c2lnbmF0dXJlLXN0cmluZw=="
+    raw.write_bytes(json.dumps({"attestation_bundles": [{"attestations": [{"envelope": {
+        "statement": payload, "signature": signature}}]}]}).encode())
+    GitMirrorPublisher.adapt_rhtl_pep740(raw, output)
+    adapted = json.loads(output.read_text())
+    assert adapted == {"payloadType": "application/vnd.in-toto+json", "payload": payload,
+                       "signatures": [{"sig": signature}]}
+    assert json.loads(raw.read_bytes())["attestation_bundles"][0]["attestations"][0]["envelope"]["statement"] == payload
+    raw.write_text("{malformed")
+    with pytest.raises(ValueError, match="malformed"):
+        GitMirrorPublisher.adapt_rhtl_pep740(raw, output)
+
+
+def test_verify_blob_attestation_targets_acquired_and_never_resigns(monkeypatch, tmp_path: Path):
+    source = tmp_path / "downloads" / "original.tar.gz"
+    signature = tmp_path / "provenance.dsse.json"
+    key = tmp_path / "release3.pub"
+    source.parent.mkdir(); source.write_bytes(b"original"); signature.write_text("{}\n"); key.write_text("public")
+    captured = []
+    monkeypatch.setattr("taisce_cuan.git_mirror.shutil.which", lambda _: "/bin/cosign")
+    monkeypatch.setattr("taisce_cuan.git_mirror.subprocess.run", lambda command, **kwargs: captured.append(command) or SimpleNamespace(returncode=0, stderr=""))
+    GitMirrorPublisher.verify_blob_attestation(source, signature, str(key))
+    assert captured[0][1] == "verify-blob-attestation"
+    assert captured[0][-1] == str(source)
+    assert "attest-blob" not in captured[0]
+
+
 def test_sign_attestation_fail_closed(tmp_path: Path):
     source_file = create_sample_source(tmp_path, "sign-test", "1.0.0")
     workspace = tmp_path / "workspace"
@@ -277,7 +308,7 @@ def test_sign_attestation_fail_closed(tmp_path: Path):
 
 def test_sign_attestation_uses_configured_cosign_policy(monkeypatch, tmp_path: Path):
     source_file = create_sample_source(tmp_path, "cosign-policy", "1.0.0")
-    output_file = tmp_path / "metadata.dsse"
+    output_file = tmp_path / "metadata.dsse.json"
     key_file = tmp_path / "cosign.key"
     key_file.write_text("test key")
     publisher = GitMirrorPublisher(
@@ -594,7 +625,7 @@ def test_legacy_provenance_is_not_converted_or_published(tmp_path: Path):
     lightwell = workspace / "pypi.org-legacy-provenance" / ".lightwell"
     assert not (lightwell / "provenance.json").exists()
     assert not (lightwell / "provenance.dsse").exists()
-    assert not (lightwell / "metadata.dsse").exists()
+    assert not (lightwell / "metadata.dsse.json").exists()
 
 
 def test_cli_push_auto_discover_metadata(tmp_path: Path):
