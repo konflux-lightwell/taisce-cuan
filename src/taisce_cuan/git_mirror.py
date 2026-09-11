@@ -229,7 +229,7 @@ class GitMirrorPublisher:
         """Verify a Cosign DSSE blob, failing closed before any publication."""
         key = (public_key or "").strip()
         if not key:
-            raise ValueError("RHTL provenance public key is required for attestation verification")
+            raise ValueError("public verification key is required for attestation verification")
         if not key.startswith(("awskms://", "k8s://", "gcpkms://", "azurekms://", "vault://")) and not Path(key).is_file():
             raise ValueError(f"Verification key '{key}' does not exist or is not a file")
         cosign_bin = shutil.which("cosign")
@@ -307,7 +307,7 @@ class GitMirrorPublisher:
         allow_overwrite: bool = False,
         sign_key: Optional[str] = None,
         provenance_path: Optional[Path] = None,
-        rhtl_provenance_public_key: Optional[str] = None,
+        public_key: Optional[str] = None,
         dry_run: bool = False,
     ) -> str:
         """Publish normalized source plus the fixed provenance carrier evidence."""
@@ -380,7 +380,7 @@ class GitMirrorPublisher:
         adapted_pep740 = carrier_root / "provenance.dsse.json"
         if source_registry in {"rhtl", "packages.redhat.com"} and raw_pep740.is_file():
             self.adapt_rhtl_pep740(raw_pep740, adapted_pep740)
-            self.verify_blob_attestation(original_archive, adapted_pep740, rhtl_provenance_public_key or os.getenv("RHTL_PROVENANCE_PUBLIC_KEY", ""))
+            self.verify_blob_attestation(original_archive, adapted_pep740, public_key or os.getenv("PUBLIC_KEY", ""))
         elif source_registry in {"rhtl", "packages.redhat.com"} and provenance.get("advertised"):
             raise ValueError("advertised RHTL provenance evidence is missing")
         logger.info(f"Publishing {package} {version} ({source_sha256}) to {repo_name}")
@@ -618,7 +618,7 @@ class GitMirrorPublisher:
         allow_overwrite: bool = False,
         sign_key: Optional[str] = None,
         provenance_path: Optional[Path] = None,
-        rhtl_provenance_public_key: Optional[str] = None,
+        public_key: Optional[str] = None,
         dry_run: bool = False,
     ) -> str:
         return self.publish_source(
@@ -632,6 +632,6 @@ class GitMirrorPublisher:
             allow_overwrite=allow_overwrite,
             sign_key=sign_key,
             provenance_path=provenance_path,
-            rhtl_provenance_public_key=rhtl_provenance_public_key,
+            public_key=public_key,
             dry_run=dry_run,
         )
