@@ -18,13 +18,11 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import sys
 from pathlib import Path
 
-from taisce_cuan.fetcher import SdistFetcher
+from taisce_cuan.fetcher import SdistFetcher, RHTL_SIMPLE_DEFAULT, PYPI_API_DEFAULT
 from taisce_cuan.git_mirror import GitMirrorPublisher
-from taisce_cuan.sdist import inspect_sdist_metadata
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("taisce-cuan")
@@ -38,45 +36,45 @@ def create_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # fetch command
-    fetch_parser = subparsers.add_parser("fetch", help="Fetch a source archive from RHTL/PyPI and verify its checksum")
+    fetch_parser = subparsers.add_parser("fetch", help="Fetch an sdist from RHTL/PyPI and verify its checksum")
     fetch_parser.add_argument("package", help="Package name (e.g. sniffio)")
     fetch_parser.add_argument("version", help="Package version (e.g. 1.3.1)")
-    fetch_parser.add_argument("--output-dir", "-o", default="./sdists", help="Directory to save downloaded source archive")
-    fetch_parser.add_argument("--registries", default="rhtl,pypi.org", help="Comma-separated ordered list of source registries to query (e.g. 'rhtl,pypi.org', 'rhtl', 'pypi.org')")
-    fetch_parser.add_argument("--rhtl-only", action="store_true", help="Fail if not found in RHTL (deprecated: use --registries=rhtl)")
+    fetch_parser.add_argument("--output-dir", "-o", default="./sdists", help="Directory to save downloaded sdist")
+    fetch_parser.add_argument("--rhtl-only", action="store_true", help="Fail if not found in RHTL")
+    fetch_parser.add_argument("--rhtl-simple-url", default=None, help=argparse.SUPPRESS)
+    fetch_parser.add_argument("--pypi-api-url", default=None, help=argparse.SUPPRESS)
 
     # push command
-    push_parser = subparsers.add_parser("push", help="Unpack source archive, generate SLSA metadata, commit and push to Git forge")
-    push_parser.add_argument("--source", "--sdist", "-s", required=True, dest="source", help="Path to local source archive (.tar.gz)")
-    push_parser.add_argument("--package", "-p", default=None, help="Package name (optional; auto-discovered from source archive if omitted)")
-    push_parser.add_argument("--version", "-v", default=None, help="Package version (optional; auto-discovered from source archive if omitted)")
+    push_parser = subparsers.add_parser("push", help="Unpack sdist, generate SLSA metadata, commit and push to GitLab")
+    push_parser.add_argument("--sdist", "-s", required=True, help="Path to local sdist (.tar.gz)")
+    push_parser.add_argument("--package", "-p", required=True, help="Package name")
+    push_parser.add_argument("--version", "-v", required=True, help="Package version")
     push_parser.add_argument("--workspace-dir", "-w", default="/tmp/taisce-work", help="Working directory for git repo")
-    push_parser.add_argument("--forge-url", "--gitlab-url", required=True, help="Git forge base URL")
-    push_parser.add_argument("--group", required=True, help="Target group or organization on the forge")
-    push_parser.add_argument("--remote-url", default=os.getenv("GIT_REMOTE_URL"), help="Explicit full remote Git repository URL")
-    push_parser.add_argument("--auth-token", default=os.getenv("GITLAB_TOKEN") or os.getenv("GIT_AUTH_TOKEN"), help="Git forge access token")
-    push_parser.add_argument("--committer-name", required=True, help="Git author and committer name")
-    push_parser.add_argument("--committer-email", required=True, help="Git author and committer email")
-    push_parser.add_argument("--allow-overwrite", "--overwrite", action="store_true", help="Allow updating existing tag with different content")
-    push_parser.add_argument("--sign-key", default=os.getenv("SIGN_KEY"), help="Path or KMS key ID for cosign attestation signing")
-    push_parser.add_argument("--provenance-path", type=Path, help="Explicit file path where signed provenance should be written")
+    push_parser.add_argument("--gitlab-url", default="https://gitlab.cee.redhat.com", help="GitLab base URL")
+    push_parser.add_argument("--group", default="lightwell/lightwell-builds", help="GitLab target group")
+    push_parser.add_argument("--auth-token-file", type=Path, help="Read GitLab access token from this file")
     push_parser.add_argument("--dry-run", action="store_true", help="Do not push to remote")
+    push_parser.add_argument("--source-origin", help="Acquisition source-origin.json sidecar")
+    push_parser.add_argument("--signer-authorization", help="Validated signer authorization artifact")
+    push_parser.add_argument("--artifact-boundary", help="Validated artifact boundary artifact")
 
     return parser
 
 
 def handle_fetch(args: argparse.Namespace) -> int:
-    fetcher = SdistFetcher()
+    fetcher = SdistFetcher(
+        rhtl_simple_url=args.rhtl_simple_url or RHTL_SIMPLE_DEFAULT,
+        pypi_api_url=args.pypi_api_url or PYPI_API_DEFAULT,
+    )
     output_dir = Path(args.output_dir)
     try:
         sdist_path, source_info, _ = fetcher.fetch(
             package=args.package,
             version=args.version,
             output_dir=output_dir,
-            registries=args.registries,
             rhtl_only=args.rhtl_only,
         )
-        logger.info(f"Successfully fetched source archive: {sdist_path}")
+        logger.info(f"Successfully fetched sdist: {sdist_path}")
         return 0
     except Exception as e:
         logger.error(f"Failed to fetch {args.package} {args.version}: {e}")
@@ -84,48 +82,32 @@ def handle_fetch(args: argparse.Namespace) -> int:
 
 
 def handle_push(args: argparse.Namespace) -> int:
-    source_path = Path(args.source)
-    if not source_path.exists():
-        logger.error(f"Source file does not exist: {source_path}")
+    sdist_path = Path(args.sdist)
+    if not sdist_path.exists():
+        logger.error(f"sdist file does not exist: {sdist_path}")
         return 1
 
-    package = args.package
-    version = args.version
-
-    if not package or not version:
-        try:
-            discovered_pkg, discovered_ver = inspect_sdist_metadata(source_path)
-            package = package or discovered_pkg
-            version = version or discovered_ver
-            logger.info(f"Auto-discovered package metadata from archive: {package}=={version}")
-        except Exception as e:
-            logger.error(f"Failed to auto-discover package name or version from {source_path}: {e}")
-            return 1
-
     publisher = GitMirrorPublisher(
-        forge_url=args.forge_url,
+        gitlab_url=args.gitlab_url,
         group=args.group,
-        auth_token=args.auth_token,
-        committer_name=args.committer_name,
-        committer_email=args.committer_email,
-        remote_url=args.remote_url,
+        auth_token_file=args.auth_token_file,
     )
 
     try:
-        tag_name = publisher.publish_source(
-            source_path=source_path,
-            package=package,
-            version=version,
+        tag_name = publisher.publish_sdist(
+            sdist_path=sdist_path,
+            package=args.package,
+            version=args.version,
             workspace_dir=Path(args.workspace_dir),
-            allow_overwrite=args.allow_overwrite,
-            sign_key=args.sign_key,
-            provenance_path=args.provenance_path,
+            source_origin_path=Path(args.source_origin) if args.source_origin else None,
+            signer_authorization_path=Path(args.signer_authorization) if args.signer_authorization else None,
+            artifact_boundary_path=Path(args.artifact_boundary) if args.artifact_boundary else None,
             dry_run=args.dry_run,
         )
-        logger.info(f"Successfully published {package} {version} with tag {tag_name}")
+        logger.info(f"Successfully published {args.package} {args.version} with tag {tag_name}")
         return 0
     except Exception as e:
-        logger.error(f"Failed to publish {package} {version}: {e}")
+        logger.error(f"Failed to publish {args.package} {args.version}: {e}")
         return 1
 
 

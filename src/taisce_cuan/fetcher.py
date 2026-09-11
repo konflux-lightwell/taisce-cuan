@@ -1,43 +1,24 @@
-"""
-Copyright (C) 2026 Lightwell
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-         http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
-
+"""Secure acquisition of Python source distributions and origin evidence."""
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
-import re
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 
 from taisce_cuan.sdist import canonicalize_name, compute_sha256
 
 logger = logging.getLogger(__name__)
-
 RHTL_SIMPLE_DEFAULT = "https://packages.redhat.com/api/pypi/public-trusted-libraries/main/simple"
 PYPI_API_DEFAULT = "https://pypi.org/pypi"
-
-SUPPORTED_REGISTRIES = {
-    "rhtl",
-    "packages.redhat.com",
-    "pypi",
-    "pypi.org",
-    "pypi.python.org",
-}
+# Provenance is opaque, but must still have a bounded resource commitment.
+MAX_PROVENANCE_RESPONSE_BYTES = 10 * 1024 * 1024
+SUPPORTED_REGISTRIES = {"rhtl", "packages.redhat.com", "pypi", "pypi.org", "pypi.python.org"}
 
 
 @dataclass(frozen=True)
@@ -48,146 +29,196 @@ class SdistSourceInfo:
     size: int
     upload_time: Optional[str]
     provenance_url: Optional[str] = None
+    origin_metadata: dict[str, Any] = field(default_factory=dict)
+    response_bytes: Optional[bytes] = None
+    response_status: Optional[int] = None
+    response_url: Optional[str] = None
 
 
 class SdistFetcher:
-    """Resolves and downloads sdists from RHTL and PyPI."""
-
-    def __init__(
-        self,
-        rhtl_simple_url: str = RHTL_SIMPLE_DEFAULT,
-        pypi_api_url: str = PYPI_API_DEFAULT,
-        client: Optional[httpx.Client] = None,
-    ):
+    """Resolve and download sdists. Network TLS verification is never disabled."""
+    def __init__(self, rhtl_simple_url: str = RHTL_SIMPLE_DEFAULT,
+                 pypi_api_url: str = PYPI_API_DEFAULT, client: Optional[httpx.Client] = None):
         self.rhtl_simple_url = rhtl_simple_url.rstrip("/")
         self.pypi_api_url = pypi_api_url.rstrip("/")
         self._client = client or httpx.Client(timeout=30.0, follow_redirects=True)
 
     def query_rhtl(self, package: str, version: str) -> Optional[SdistSourceInfo]:
-        """Query RHTL PEP 691 Simple JSON index for the package version."""
-        canonical = canonicalize_name(package)
-        url = f"{self.rhtl_simple_url}/{canonical}/"
-        headers = {"Accept": "application/vnd.pypi.simple.v1+json"}
-
+        url = f"{self.rhtl_simple_url}/{canonicalize_name(package)}/"
         try:
-            resp = self._client.get(url, headers=headers)
-            if resp.status_code != 200:
+            response = self._client.get(url, headers={"Accept": "application/vnd.pypi.simple.v1+json"})
+            if response.status_code != 200:
                 return None
-            data = resp.json()
-            pattern = re.compile(
-                rf"^{re.escape(canonical).replace('-', '[-_.]')}-{re.escape(version)}\.tar\.gz$",
-                re.IGNORECASE,
-            )
-            for file_entry in data.get("files", []):
-                fn = file_entry.get("filename", "")
-                if pattern.match(fn):
-                    return SdistSourceInfo(
-                        registry="rhtl",
-                        download_url=file_entry["url"],
-                        sha256=file_entry.get("hashes", {}).get("sha256", ""),
-                        size=file_entry.get("size", 0),
-                        upload_time=file_entry.get("upload-time"),
-                        provenance_url=file_entry.get("provenance"),
-                    )
-        except Exception as e:
-            logger.warning(f"Error querying RHTL for {package} {version}: {e}")
+            for entry in response.json().get("files", []):
+                filename = entry.get("filename", "")
+                if filename.endswith(".tar.gz") and f"-{version}." in filename:
+                    if "provenance" in entry:
+                        advertised = entry["provenance"]
+                        if not isinstance(advertised, str) or not advertised:
+                            raise ValueError("RHTL advertised provenance is malformed or empty")
+                    else:
+                        advertised = None
+                    return SdistSourceInfo("rhtl", entry["url"], entry.get("hashes", {}).get("sha256", ""),
+                        entry.get("size", 0), entry.get("upload-time"), advertised,
+                        response_bytes=response.content, response_status=response.status_code, response_url=url)
+        except ValueError as exc:
+            if "advertised provenance" in str(exc):
+                raise
+            logger.warning("Error querying RHTL for %s %s: %s", package, version, exc)
+        except (httpx.HTTPError, KeyError) as exc:
+            logger.warning("Error querying RHTL for %s %s: %s", package, version, exc)
         return None
 
     def query_pypi(self, package: str, version: str) -> Optional[SdistSourceInfo]:
-        """Query PyPI JSON API for the package version."""
-        url = f"{self.pypi_api_url}/{package}/{version}/json"
         try:
-            resp = self._client.get(url)
-            if resp.status_code != 200:
+            response = self._client.get(f"{self.pypi_api_url}/{package}/{version}/json")
+            if response.status_code != 200:
                 return None
-            data = resp.json()
-            for u in data.get("urls", []):
-                if u.get("filename", "").endswith(".tar.gz"):
-                    return SdistSourceInfo(
-                        registry="pypi.org",
-                        download_url=u["url"],
-                        sha256=u.get("digests", {}).get("sha256", ""),
-                        size=u.get("size", 0),
-                        upload_time=u.get("upload_time"),
-                        provenance_url=None,
-                    )
-        except Exception as e:
-            logger.warning(f"Error querying PyPI for {package} {version}: {e}")
+            data = response.json()
+            for entry in data.get("urls", []):
+                if entry.get("filename", "").endswith(".tar.gz"):
+                    # Keep PyPI's origin metadata verbatim; it is not provenance.
+                    origin = entry.get("data-requires-python") or data.get("info", {}).get("project_urls")
+                    return SdistSourceInfo("pypi.org", entry["url"], entry.get("digests", {}).get("sha256", ""),
+                        entry.get("size", 0), entry.get("upload_time"), None,
+                        {"project_urls": data.get("info", {}).get("project_urls", {}),
+                         "requires_python": entry.get("data-requires-python")})
+        except (httpx.HTTPError, ValueError, KeyError) as exc:
+            logger.warning("Error querying PyPI for %s %s: %s", package, version, exc)
         return None
 
-    def fetch(
-        self,
-        package: str,
-        version: str,
-        output_dir: Path,
-        registries: Optional[list[str] | str] = None,
-        rhtl_only: bool = False,
-    ) -> tuple[Path, SdistSourceInfo, Optional[SdistSourceInfo]]:
-        """Download sdist, verify sha256, and return downloaded file path + metadata."""
+    @staticmethod
+    def _write_atomic(path: Path, data: bytes) -> None:
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        try:
+            with temporary.open("wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            # A directory fsync makes the rename durable. Windows does not support
+            # opening directories this way, so durability is best-effort there.
+            if os.name != "nt":
+                flags = getattr(os, "O_DIRECTORY", 0)
+                try:
+                    directory_fd = os.open(path.parent, os.O_RDONLY | flags)
+                except OSError:
+                    directory_fd = None
+                if directory_fd is not None:
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _retrieve_provenance(self, url: str, output_dir: Path, origin: dict[str, Any]) -> None:
+        parsed = httpx.URL(url)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(f"provenance URL must use HTTP(S): {url}")
+        # Stream opaque bytes so neither httpx nor this code materializes an unbounded body.
+        with self._client.stream("GET", url) as response:
+            content_length = response.headers.get("content-length")
+            if content_length is not None:
+                try:
+                    declared_length = int(content_length)
+                except ValueError as exc:
+                    raise ValueError("provenance response has invalid Content-Length") from exc
+                if declared_length < 0 or declared_length > MAX_PROVENANCE_RESPONSE_BYTES:
+                    raise ValueError("provenance response exceeds maximum size")
+            filename = "provenance-response.bin"  # explicitly not a DSSE envelope
+            temporary = output_dir / f".{filename}.{os.getpid()}.tmp"
+            digest = hashlib.sha256()
+            total = 0
+            try:
+                with temporary.open("wb") as stream:
+                    for chunk in response.iter_bytes():
+                        total += len(chunk)
+                        if total > MAX_PROVENANCE_RESPONSE_BYTES:
+                            raise ValueError("provenance response exceeds maximum size")
+                        stream.write(chunk)
+                        digest.update(chunk)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, output_dir / filename)
+                if os.name != "nt":
+                    flags = getattr(os, "O_DIRECTORY", 0)
+                    try:
+                        directory_fd = os.open(output_dir, os.O_RDONLY | flags)
+                    except OSError:
+                        directory_fd = None
+                    if directory_fd is not None:
+                        try:
+                            os.fsync(directory_fd)
+                        finally:
+                            os.close(directory_fd)
+            finally:
+                temporary.unlink(missing_ok=True)
+        origin.update({"provenance_response_path": filename, "provenance_url": url,
+                       "provenance_response_sha256": digest.hexdigest(),
+                       "provenance_response_status": response.status_code})
+        if response.status_code != 200:
+            raise ValueError(f"provenance response returned HTTP {response.status_code}")
+
+    def fetch(self, package: str, version: str, output_dir: Path,
+              registries: Optional[list[str] | str] = None,
+              rhtl_only: bool = False
+              ) -> tuple[Path, SdistSourceInfo, Optional[SdistSourceInfo]]:
         output_dir.mkdir(parents=True, exist_ok=True)
-        canonical = canonicalize_name(package)
-
-        # Parse requested registries list
         if isinstance(registries, str):
-            req_regs = [r.strip().lower() for r in registries.split(",") if r.strip()]
+            requested = [r.strip().lower() for r in registries.split(",") if r.strip()]
         elif registries is not None:
-            req_regs = [r.strip().lower() for r in registries if r.strip()]
+            requested = [r.strip().lower() for r in registries if r.strip()]
         elif rhtl_only:
-            req_regs = ["rhtl"]
+            requested = ["rhtl"]
         else:
-            req_regs = ["rhtl", "pypi.org"]
-
-        # Validate that all requested registries are supported
-        for reg in req_regs:
-            if reg not in SUPPORTED_REGISTRIES:
-                valid_opts = ", ".join(sorted(SUPPORTED_REGISTRIES))
-                raise ValueError(
-                    f"Unrecognized registry '{reg}'. Supported registries are: {valid_opts}"
-                )
-
-        target_info: Optional[SdistSourceInfo] = None
-        rhtl_info: Optional[SdistSourceInfo] = None
-        pypi_info: Optional[SdistSourceInfo] = None
-
-        for reg in req_regs:
-            if reg in ("rhtl", "packages.redhat.com"):
-                if rhtl_info is None:
-                    rhtl_info = self.query_rhtl(package, version)
-                if rhtl_info:
-                    target_info = rhtl_info
-                    break
-            elif reg in ("pypi", "pypi.org", "pypi.python.org"):
-                if pypi_info is None:
-                    pypi_info = self.query_pypi(package, version)
-                if pypi_info:
-                    target_info = pypi_info
-                    break
-
-        if not target_info:
-            raise RuntimeError(
-                f"Package {package} {version} could not be resolved from requested registries: {req_regs}"
-            )
-
-        if not target_info.sha256:
-            raise ValueError(
-                f"No SHA-256 digest provided by registry '{target_info.registry}' for {canonical}-{version}.tar.gz"
-            )
-
-        dest_file = output_dir / f"{canonical}-{version}.tar.gz"
-        logger.info(f"Downloading {package} {version} from {target_info.registry}: {target_info.download_url}")
-
-        with self._client.stream("GET", target_info.download_url) as response:
+            requested = ["rhtl", "pypi.org"]
+        for registry in requested:
+            if registry not in SUPPORTED_REGISTRIES:
+                raise ValueError(f"Unrecognized registry '{registry}'. Supported registries are: {', '.join(sorted(SUPPORTED_REGISTRIES))}")
+        rhtl_info = self.query_rhtl(package, version) if any(r in ("rhtl", "packages.redhat.com") for r in requested) else None
+        pypi_info = self.query_pypi(package, version) if any(r in ("pypi", "pypi.org", "pypi.python.org") for r in requested) else None
+        target = None
+        for registry in requested:
+            candidate = rhtl_info if registry in ("rhtl", "packages.redhat.com") else pypi_info
+            if candidate:
+                target = candidate
+                break
+        if target is None:
+            raise RuntimeError(f"Package {package} {version} could not be resolved from requested registries: {requested}")
+        if not target.sha256:
+            raise ValueError(f"No SHA-256 digest provided by registry '{target.registry}' for {canonicalize_name(package)}-{version}.tar.gz")
+        if not target:
+            raise RuntimeError(f"Package {package} {version} could not be resolved from RHTL or PyPI")
+        destination = output_dir / f"{canonicalize_name(package)}-{version}.tar.gz"
+        with self._client.stream("GET", target.download_url) as response:
             response.raise_for_status()
-            with open(dest_file, "wb") as f:
-                for chunk in response.iter_bytes():
-                    f.write(chunk)
-
-        actual_sha256 = compute_sha256(dest_file)
-        if actual_sha256 != target_info.sha256:
-            dest_file.unlink(missing_ok=True)
-            raise ValueError(
-                f"SHA-256 mismatch for {dest_file.name}: expected {target_info.sha256}, got {actual_sha256}"
-            )
-
-        logger.info(f"Verified {dest_file.name} (sha256: {actual_sha256})")
-        return dest_file, target_info, pypi_info
+            temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+            with temporary.open("wb") as stream:
+                for chunk in response.iter_bytes(): stream.write(chunk)
+            temporary.replace(destination)
+        actual = compute_sha256(destination)
+        if target.sha256 and actual.lower() != target.sha256.lower():
+            destination.unlink(missing_ok=True)
+            raise ValueError(f"SHA-256 mismatch for {destination.name}: expected {target.sha256}, got {actual}")
+        # Keep the acquired carrier explicit: Fromager can consume this path and digest
+        # without guessing whether verified_sha256 describes the normalized archive.
+        artifact_path = destination.name
+        origin = {"schema_version": "1", "package": package, "canonical_name": canonicalize_name(package),
+                  "version": version, "source_registry": target.registry, "artifact_url": target.download_url,
+                  "declared_sha256": target.sha256 or None, "verified_sha256": actual,
+                  "acquired_artifact": {"path": artifact_path, "sha256": actual},
+                  "provenance_url": target.provenance_url, "retrieved_at": __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
+                  "pypi_origin_metadata": (pypi_info.origin_metadata if pypi_info else {})}
+        if target.registry == "rhtl" and target.response_bytes is not None:
+            response_path = output_dir / "rhtl-response.json"
+            self._write_atomic(response_path, target.response_bytes)
+            origin.update({"rhtl_response_path": response_path.name,
+                           "rhtl_response_sha256": hashlib.sha256(target.response_bytes).hexdigest(),
+                           "rhtl_response_url": target.response_url,
+                           "rhtl_response_status": target.response_status})
+        if target.provenance_url:
+            self._retrieve_provenance(target.provenance_url, output_dir, origin)
+        origin_path = output_dir / "source-origin.json"
+        self._write_atomic(origin_path, json.dumps(origin, indent=2, sort_keys=True).encode() + b"\n")
+        return destination, target, pypi_info

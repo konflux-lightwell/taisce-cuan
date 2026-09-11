@@ -1,4 +1,3 @@
----
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
@@ -6,12 +5,15 @@ metadata:
   labels:
     app.kubernetes.io/name: fetch-source
     app.kubernetes.io/part-of: lightwell
-    # Required by tkn-bundle-oci-ta; becomes the published catalog version.
-    app.kubernetes.io/version: "0.1"
 spec:
   description: |-
-    Resolves and downloads an sdist from configured registries (RHTL / PyPI), verifies its SHA-256 digest,
-    and packages it into a Trusted Artifact (SDISTS_ARTIFACT).
+    Resolves and downloads an sdist from RHTL (PEP 691) or PyPI, verifying its SHA-256 digest.
+  stepTemplate:
+    securityContext:
+      runAsUser: 1001
+    env:
+      - name: GIT_TERMINAL_PROMPT
+        value: "0"
   params:
     - name: packageName
       description: Package name (e.g. sniffio).
@@ -19,88 +21,45 @@ spec:
     - name: packageVersion
       description: Package version (e.g. 1.3.1).
       type: string
-    - name: sourceRegistries
-      description: Comma-separated list of source registries to query in order (e.g. "rhtl,pypi.org", "rhtl", "pypi.org").
+    - name: rhtlOnly
+      description: Fail if package not found in RHTL.
       type: string
-      default: "rhtl,pypi.org"
-    - name: ociStorage
-      description: OCI reference used as the store for Trusted Artifacts.
+      default: "false"
+    - name: image
+      description: Deployment-supplied immutable image reference (must end in @sha256:<64 lowercase hex>). No default is provided.
       type: string
-      default: ""
-    - name: ociArtifactExpiresAfter
-      description: Expiration for Trusted Artifact OCI objects.
-      type: string
-      default: ""
-    - name: caTrustConfigMapName
-      description: The name of the ConfigMap to read CA bundle data from.
-      type: string
-      default: trusted-ca
-    - name: caTrustConfigMapKey
-      description: The name of the key in the ConfigMap that contains the CA bundle data.
-      type: string
-      default: ca-bundle.crt
+      format: string
+  workspaces:
+    - name: sdists
+      description: Workspace directory where the downloaded sdist will be placed.
   results:
     - name: sdistPath
       description: Relative path of the downloaded sdist file.
-    - name: SDISTS_ARTIFACT
-      description: The Trusted Artifact URI pointing to the pre-populated sdists-repo directory.
-  volumes:
-    - name: trusted-ca
-      configMap:
-        items:
-          - key: $(params.caTrustConfigMapKey)
-            path: ca-bundle.crt
-        name: $(params.caTrustConfigMapName)
-        optional: true
-    - name: workdir
-      emptyDir: {}
-  stepTemplate:
-    volumeMounts:
-      - mountPath: /var/workdir
-        name: workdir
-      - mountPath: /mnt/trusted-ca
-        name: trusted-ca
-        readOnly: true
+    - name: sourceOriginPath
+      description: Acquisition source-origin.json sidecar.
+      type: string
   steps:
     - name: fetch-sdist
-      image: quay.io/light-castle/taisce-cuan:latest
-      computeResources:
-        limits:
-          memory: 256Mi
-          cpu: 200m
-        requests:
-          memory: 128Mi
-          cpu: 50m
+      image: $(params.image)
       env:
         - name: HOME
           value: /tekton/home
       script: |
         #!/usr/bin/env bash
         set -euo pipefail
-
-        SDISTS_DIR="/var/workdir/sdists-repo/downloads"
-        mkdir -p "${SDISTS_DIR}"
+        if ! [[ "$(params.image)" =~ ^[^@[:space:]]+@sha256:[0-9a-f]{64}$ ]]; then
+          echo "image must be an immutable registry digest" >&2
+          exit 1
+        fi
+        EXTRA_FLAGS=""
+        if [ "$(params.rhtlOnly)" = "true" ]; then
+          EXTRA_FLAGS="--rhtl-only"
+        fi
 
         taisce-cuan fetch "$(params.packageName)" "$(params.packageVersion)" \
-          --output-dir "${SDISTS_DIR}" \
-          --registries="$(params.sourceRegistries)"
+          --output-dir "$(workspaces.sdists.path)" \
+          $EXTRA_FLAGS
 
-        CANONICAL=$(python3 -c "import re, sys; print(re.sub(r'[-_.]+', '-', sys.argv[1]).lower())" \
-          "$(params.packageName)")
-        echo -n "downloads/${CANONICAL}-$(params.packageVersion).tar.gz" > "$(results.sdistPath.path)"
-
-    - name: create-sdists-artifact
-      image: quay.io/konflux-ci/build-trusted-artifacts:latest@sha256:2712c8a6453fc9db5fc4c2d9d952554a4eea46d2fdba47a272b79fa07f8c8c40
-      env:
-        - name: IMAGE_EXPIRES_AFTER
-          value: $(params.ociArtifactExpiresAfter)
-      args:
-        - create
-        - --store
-        - $(params.ociStorage)
-        - $(results.SDISTS_ARTIFACT.path)=/var/workdir/sdists-repo
-      volumeMounts:
-        - mountPath: /etc/pki/tls/certs/ca-custom-bundle.crt
-          name: trusted-ca
-          readOnly: true
-          subPath: ca-bundle.crt
+        CANONICAL=$(python3 -c "import re, sys; print(re.sub(r'[-_.]+', '-', sys.argv[1]).lower())" "$(params.packageName)")
+        echo -n "$(workspaces.sdists.path)/${CANONICAL}-$(params.packageVersion).tar.gz" > "$(results.sdistPath.path)"
+        echo -n "$(workspaces.sdists.path)/source-origin.json" > "$(results.sourceOriginPath.path)"
