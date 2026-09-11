@@ -124,7 +124,13 @@ https://slsa.dev/provenance/v1` using the provisioned immutable public verificat
 `metadata.dsse.json` is Lightwell-signed for every published route. There is
 no signed final Git tree hash: adding metadata and attestation files changes
 the Git tree, so the signed binding is the normalized archive and evidence
-closure instead.
+closure instead. Final `metadata.json` records that closure in
+`predicate.buildDefinition.resolvedDependencies`: each member has a deterministic
+local mirror URI, SHA-256, and role annotation. The closure includes the
+Lightwell origin/transformation records, acquired and normalized archives, and
+the applicable RHTL PEP 691/PEP 740/adapted DSSE evidence (or only PEP 691
+evidence when provenance was not advertised). PyPI metadata does not claim RHTL
+evidence.
 
 ## Fail-closed requirements
 
