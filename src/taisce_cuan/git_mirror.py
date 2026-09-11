@@ -515,8 +515,11 @@ class GitMirrorPublisher:
         normalized_archive = lightwell_dir / source_path.name
         shutil.copyfile(source_path, normalized_archive)
         (lightwell_dir / "metadata.dsse").unlink(missing_ok=True)
+        (lightwell_dir / "provenance.dsse").unlink(missing_ok=True)
         if source_registry in {"rhtl", "packages.redhat.com"}:
             (lightwell_dir / "provenance.dsse").unlink(missing_ok=True)
+            if not provenance.get("advertised"):
+                (lightwell_dir / "provenance.dsse.json").unlink(missing_ok=True)
         metadata_file = lightwell_dir / "metadata.json"
 
         now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -622,7 +625,7 @@ class GitMirrorPublisher:
                     metadata=metadata,
                     source_file=source_path,
                     sign_key=sign_key,
-                    output_provenance_file=lightwell_dir / "provenance.dsse",
+                    output_provenance_file=lightwell_dir / "provenance.dsse.json",
                 )
 
         # Git stage and commit initial state

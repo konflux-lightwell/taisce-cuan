@@ -109,7 +109,7 @@ For an unadvertised RHTL response, it retains instead:
 
 For PyPI, no upstream PEP 740 evidence is synthesized; when a signing key is
 configured, Lightwell writes its own signed attestation over the normalized
-archive to `.lightwell/provenance.dsse`.
+archive to `.lightwell/provenance.dsse.json`.
 
 For advertised RHTL evidence, `provenance.dsse.json` is built only from the
 original base64 strings at `attestation_bundles[0].attestations[0].envelope`:
@@ -133,8 +133,9 @@ evidence.
 ### Provenance Artifact Distinctions
 
 To avoid conflation between native assertions and relayed upstream evidence:
-- `.lightwell/provenance.dsse`: Native Lightwell attestation over the normalized archive, signed by Lightwell's own key (`sign_key`). Emitted only for PyPI when signing is enabled.
-- `.lightwell/provenance.dsse.json`: Representation-only adaptation of upstream RHTL PEP 740 attestation (signed upstream by RELEASE3, never re-signed by Lightwell), verified against the acquired sdist before publish.
+- `.lightwell/provenance.dsse.json`: Standard in-toto DSSE attestation envelope for source provenance:
+  - For PyPI: Native Lightwell attestation over the normalized archive, signed by Lightwell's own key (`sign_key`). Emitted only when signing is enabled.
+  - For RHTL: Representation-only adaptation of upstream RHTL PEP 740 attestation over the exact acquired sdist in `downloads/` (signed upstream by RELEASE3, never re-signed by Lightwell, and retained beside its raw `provenance.pep740.json`), verified against the acquired sdist before publish.
 - `.lightwell/metadata.dsse.json`: Native Lightwell attestation signing `metadata.json`, emitted whenever signing is enabled.
 
 ### Mirror Repository Storage Note
