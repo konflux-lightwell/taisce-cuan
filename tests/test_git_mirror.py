@@ -702,6 +702,7 @@ def test_legacy_provenance_is_not_converted_or_published(tmp_path: Path):
     lightwell = workspace / "pypi.org-legacy-provenance" / ".lightwell"
     assert not (lightwell / "provenance.json").exists()
     assert not (lightwell / "provenance.dsse").exists()
+    assert not (lightwell / "provenance.dsse.json").exists()
     assert not (lightwell / "metadata.dsse.json").exists()
 
 
@@ -738,6 +739,8 @@ def test_publish_source_signing_and_legacy_unlinking(tmp_path: Path, monkeypatch
     lightwell_dir.mkdir(parents=True, exist_ok=True)
     legacy_envelope = lightwell_dir / "metadata.dsse"
     legacy_envelope.write_text('{"stale": true}\n')
+    legacy_prov_envelope = lightwell_dir / "provenance.dsse"
+    legacy_prov_envelope.write_text('{"stale_prov": true}\n')
 
     key_file = tmp_path / "signing.key"
     key_file.write_text("private key bytes")
@@ -776,10 +779,13 @@ def test_publish_source_signing_and_legacy_unlinking(tmp_path: Path, monkeypatch
         dry_run=True,
     )
 
-    # Legacy metadata.dsse must be unlinked
+    # Legacy metadata.dsse and provenance.dsse must be unlinked
     assert not legacy_envelope.exists()
+    assert not legacy_prov_envelope.exists()
     assert (lightwell_dir / "metadata.dsse.json").exists()
-    assert (lightwell_dir / "provenance.dsse").exists()
+    assert (lightwell_dir / "provenance.dsse.json").exists()
+    assert not (lightwell_dir / "provenance.dsse").exists()
+    assert not (lightwell_dir / "metadata.dsse").exists()
 
     # Verification must be called with public key, never private key
     assert len(verify_calls) == 1
