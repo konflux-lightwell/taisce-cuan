@@ -18,13 +18,31 @@ from taisce_cuan.models import (
 
 
 def create_sample_source(path: Path, pkg_name: str, version: str, filename: str = "", extra_content: str = "") -> Path:
+    """Create a normalized sdist with its required provenance carrier evidence."""
     fn = filename or f"{pkg_name}-{version}.tar.gz"
-    source_file = path / fn
-    pkg_dir = path / f"src_{fn}"
+    carrier_root = path / f"carrier_{pkg_name}_{version}_{extra_content or 'default'}"
+    carrier_root.mkdir(parents=True, exist_ok=True)
+    source_file = carrier_root / fn
+    pkg_dir = carrier_root / f"src_{fn}"
     pkg_dir.mkdir(parents=True, exist_ok=True)
     (pkg_dir / "pyproject.toml").write_text(f"[project]\nname='{pkg_name}'\nversion='{version}'\n# {extra_content}")
     with tarfile.open(source_file, "w:gz") as tar:
         tar.add(pkg_dir, arcname=f"{pkg_name}-{version}")
+
+    import hashlib
+    source_sha256 = hashlib.sha256(source_file.read_bytes()).hexdigest()
+    (carrier_root / "source-origin.json").write_text(json.dumps({
+        "schema": "https://lightwell.dev/schemas/source-origin/v1",
+        "acquired": {"registry": "pypi.org", "sha256": source_sha256,
+                     "package": pkg_name, "version": version},
+        "provenance": {"mode": "pypi", "rhtl": {"status": "not-advertised"}},
+    }, sort_keys=True) + "\n")
+    (carrier_root / "sdist-transformation.json").write_text(json.dumps({
+        "schema": "https://lightwell.dev/schemas/sdist-transformation/v1",
+        "input": {"sha256": source_sha256},
+        "output": {"sha256": source_sha256},
+        "transformation": "normalized-sdist",
+    }, sort_keys=True) + "\n")
     return source_file
 
 
@@ -470,11 +488,9 @@ def test_git_mirror_publisher_real_bare_remote(tmp_path: Path):
     assert remote_baseline_100_after != backport_commit
 
 
-def test_two_tier_provenance_resolution_tier1_embedded(tmp_path: Path):
-    source_file = create_sample_source(tmp_path, "tier1-test", "1.0.0")
-    prov_file = tmp_path / "sdist-provenance.json"
-    prov_file.write_text('{"statement": "tier1 embedded sdist provenance"}')
-
+def test_provenance_carrier_is_published_with_normalized_sdist(tmp_path: Path):
+    source_file = create_sample_source(tmp_path, "carrier-test", "1.0.0")
+    carrier_root = source_file.parent
     workspace = tmp_path / "workspace"
     publisher = GitMirrorPublisher(
         forge_url="https://forge.example.com",
@@ -485,47 +501,25 @@ def test_two_tier_provenance_resolution_tier1_embedded(tmp_path: Path):
 
     tag = publisher.publish_source(
         source_path=source_file,
-        package="tier1-test",
+        package="carrier-test",
         version="1.0.0",
         workspace_dir=workspace,
         dry_run=True,
     )
-    assert tag == "tier1-test/1.0.0"
+    assert tag == "carrier-test/1.0.0"
 
-    repo_dir = workspace / "pypi.org-tier1-test"
-    saved_prov = repo_dir / ".lightwell" / "provenance.json"
-    assert saved_prov.exists()
-    assert "tier1 embedded sdist provenance" in saved_prov.read_text()
+    repo_dir = workspace / "pypi.org-carrier-test"
+    for evidence_name in ("source-origin.json", "sdist-transformation.json"):
+        published = repo_dir / ".lightwell" / evidence_name
+        assert published.exists()
+        assert published.read_text() == (carrier_root / evidence_name).read_text()
 
-
-def test_two_tier_provenance_resolution_tier2_chains(tmp_path: Path):
-    source_file = create_sample_source(tmp_path, "tier2-test", "1.0.0")
-    chains_dir = tmp_path / "chains-provenance"
-    chains_dir.mkdir(parents=True, exist_ok=True)
-    chains_file = chains_dir / "sha256-abc123.json"
-    chains_file.write_text('{"statement": "tier2 chains pipelinerun provenance"}')
-
-    workspace = tmp_path / "workspace"
-    publisher = GitMirrorPublisher(
-        forge_url="https://forge.example.com",
-        group="testgroup",
-        committer_name="bot",
-        committer_email="bot@example.com",
-    )
-
-    tag = publisher.publish_source(
-        source_path=source_file,
-        package="tier2-test",
-        version="1.0.0",
-        workspace_dir=workspace,
-        dry_run=True,
-    )
-    assert tag == "tier2-test/1.0.0"
-
-    repo_dir = workspace / "pypi.org-tier2-test"
-    saved_prov = repo_dir / ".lightwell" / "provenance.json"
-    assert saved_prov.exists()
-    assert "tier2 chains pipelinerun provenance" in saved_prov.read_text()
+    origin = json.loads((repo_dir / ".lightwell" / "source-origin.json").read_text())
+    transformation = json.loads((repo_dir / ".lightwell" / "sdist-transformation.json").read_text())
+    assert origin["acquired"]["registry"] == "pypi.org"
+    assert transformation["input"]["sha256"] == origin["acquired"]["sha256"]
+    assert transformation["output"]["sha256"] == origin["acquired"]["sha256"]
+    assert not (repo_dir / ".lightwell" / "provenance.json").exists()
 
 
 def test_cli_push_auto_discover_metadata(tmp_path: Path):
