@@ -81,7 +81,7 @@ spec:
       type: string
       default: "false"
     - name: signingSecretName
-      description: Name of secret containing SIGN_KEY, RELEASE3_PUBLIC_KEY, and/or cosign credentials (optional).
+      description: Name of secret containing SIGN_KEY, RHTL_PROVENANCE_PUBLIC_KEY, and/or cosign credentials (optional).
       type: string
       default: konflux-cosign-signing-production
     - name: gitSecretName
@@ -311,9 +311,17 @@ spec:
           done
         fi
 
-        if [ -n "${RELEASE3_PUBLIC_KEY:-}" ]; then
-          ARGS+=("--release3-public-key=${RELEASE3_PUBLIC_KEY}")
+        # The provisioned RHTL provenance public key is Secret data, not a
+        # command-line value. Materialize it as a short-lived file because
+        # cosign --key accepts a file path or key URI.
+        RHTL_PROVENANCE_PUBLIC_KEY_FILE=""
+        if [ -n "${RHTL_PROVENANCE_PUBLIC_KEY:-}" ]; then
+          umask 077
+          RHTL_PROVENANCE_PUBLIC_KEY_FILE="$(mktemp)"
+          printf '%s' "${RHTL_PROVENANCE_PUBLIC_KEY}" > "${RHTL_PROVENANCE_PUBLIC_KEY_FILE}"
+          ARGS+=("--rhtl-provenance-public-key=${RHTL_PROVENANCE_PUBLIC_KEY_FILE}")
         fi
+        trap 'rm -f "${RHTL_PROVENANCE_PUBLIC_KEY_FILE:-}"' EXIT
 
         if [ -n "${SIGN_KEY:-}" ]; then
           ARGS+=("--sign-key=${SIGN_KEY}")

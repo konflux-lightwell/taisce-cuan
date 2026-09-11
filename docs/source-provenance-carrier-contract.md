@@ -117,8 +117,8 @@ original base64 strings at `attestation_bundles[0].attestations[0].envelope`:
 `statement` becomes `payload` and `signature` becomes `signatures[0].sig`,
 with fixed payload type `application/vnd.in-toto+json`. It is verified with
 Cosign `verify-blob-attestation --insecure-ignore-tlog --type
-https://slsa.dev/provenance/v1` using the provisioned immutable RELEASE3 public
-key against the exact acquired `downloads/` sdist, never the normalized output.
+https://slsa.dev/provenance/v1` using the provisioned immutable RHTL provenance public key
+(currently RELEASE3) against the exact acquired `downloads/` sdist, never the normalized output.
 
 
 `metadata.dsse.json` is Lightwell-signed for every published route. There is
