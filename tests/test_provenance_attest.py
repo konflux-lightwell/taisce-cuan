@@ -17,8 +17,10 @@ limitations under the License.
 from __future__ import annotations
 
 import datetime
-import subprocess
 from pathlib import Path
+import shutil
+import subprocess
+from types import SimpleNamespace
 import pytest
 
 from taisce_cuan.provenance.attest import (
@@ -119,6 +121,35 @@ def test_cosign_attestation_signer_missing_cosign_binary(tmp_path: Path):
         signer.sign(metadata, verified.artifact.sdist, str(key_file), tmp_path / "out.dsse")
 
 
+def test_cosign_attestation_signer_mocked_invocation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    key_file = tmp_path / "key.pem"
+    key_file.write_text("dummy key")
+    out_file = tmp_path / "metadata.dsse.json"
+
+    captured: list[list[str]] = []
+    monkeypatch.setattr("taisce_cuan.provenance.attest.shutil.which", lambda _: "/bin/cosign")
+
+    def fake_run(command, **kwargs):
+        captured.append(command)
+        out_file.write_text('{"payloadType":"application/vnd.in-toto+json"}')
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("taisce_cuan.provenance.attest.subprocess.run", fake_run)
+
+    signer = CosignAttestationSigner()
+    verified = make_dummy_verified(tmp_path)
+    metadata = build_ingestion_metadata(verified, "repo")
+
+    result = signer.sign(metadata, verified.artifact.sdist, str(key_file), out_file)
+    assert result == out_file
+    assert out_file.exists()
+    assert captured[0][0] == "/bin/cosign"
+    assert captured[0][1] == "attest-blob"
+    assert f"--key={key_file}" in captured[0]
+    assert any(arg.startswith("--predicate=") for arg in captured[0])
+
+
+@pytest.mark.skipif(not shutil.which("cosign"), reason="cosign CLI binary is not installed")
 def test_cosign_signing_success_and_temp_predicate_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("COSIGN_PASSWORD", "")
     # Generate test key pair
@@ -145,6 +176,7 @@ def test_cosign_signing_success_and_temp_predicate_cleanup(tmp_path: Path, monke
     assert not list(tmp_path.glob("*-predicate.json"))
 
 
+@pytest.mark.skipif(not shutil.which("cosign"), reason="cosign CLI binary is not installed")
 def test_attest_source_mirror_pypi_vs_rhtl(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("COSIGN_PASSWORD", "")
     key_prefix = tmp_path / "cosign_key"

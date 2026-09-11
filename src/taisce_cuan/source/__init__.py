@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+from typing import Any
+
 from taisce_cuan.source.artifact import (
     AcquiredSourceArtifact,
     ArtifactError,
@@ -26,11 +28,6 @@ from taisce_cuan.source.fetch import (
     SUPPORTED_REGISTRIES,
     SdistSourceFetcher,
     SdistSourceInfo,
-)
-from taisce_cuan.source.mirror import (
-    GitMirrorPublisher,
-    _is_rhtl_registry,
-    parse_version_safe,
 )
 
 __all__ = [
@@ -47,3 +44,11 @@ __all__ = [
     "_is_rhtl_registry",
     "parse_version_safe",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name in ("GitMirrorPublisher", "_is_rhtl_registry", "parse_version_safe"):
+        from taisce_cuan.source import mirror
+
+        return getattr(mirror, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

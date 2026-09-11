@@ -147,3 +147,75 @@ def test_inspect_sdist_metadata_fallback_filename(tmp_path: Path):
     assert ver == "0.10.2b1"
 
 
+def test_fetcher_resets_per_fetch_state(tmp_path: Path):
+    from taisce_cuan.source.fetch import SdistSourceFetcher
+    import httpx
+
+    def handler(request: httpx.Request):
+        if "pypi.org" in str(request.url):
+            return httpx.Response(
+                200,
+                json={
+                    "urls": [
+                        {
+                            "filename": "demo-1.0.0.tar.gz",
+                            "url": "https://files.pythonhosted.org/demo-1.0.0.tar.gz",
+                            "digests": {"sha256": "abcdef"},
+                            "size": 10,
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    fetcher = SdistSourceFetcher(client=client)
+    # Simulate leftover RHTL state from a previous query
+    fetcher.last_rhtl_index = b"leftover index"
+    fetcher.last_advertised_provenance = b"leftover prov"
+
+    # Mock download_exact
+    fetcher.download_exact = lambda url, dest, sha, size: dest.write_bytes(b"dummy")  # type: ignore[assignment]
+
+    dest, info, _ = fetcher.fetch("demo", "1.0.0", tmp_path, registries="pypi.org")
+    # Verified: RHTL state was reset, so no leftover rhtl index was carried over
+    assert fetcher.last_rhtl_index is None
+    assert fetcher.last_advertised_provenance is None
+    assert not (tmp_path / "rhtl-index.pep691.json").exists()
+
+
+def test_fetcher_malformed_advertised_provenance_fails_closed(tmp_path: Path):
+    from taisce_cuan.source.fetch import SdistSourceFetcher
+    import httpx
+
+    def handler(request: httpx.Request):
+        url = str(request.url)
+        if "pkg-malformed" in url and "prov.json" not in url:
+            return httpx.Response(
+                200,
+                json={
+                    "files": [
+                        {
+                            "filename": "pkg-malformed-1.0.0.tar.gz",
+                            "url": "https://packages.redhat.com/pkg.tar.gz",
+                            "hashes": {"sha256": "1234"},
+                            "provenance": "https://packages.redhat.com/prov.json",
+                        }
+                    ]
+                },
+            )
+        if "prov.json" in url:
+            # Malformed non-JSON body
+            return httpx.Response(200, content=b"not valid json")
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    fetcher = SdistSourceFetcher(client=client)
+    fetcher.download_exact = lambda url, dest, sha, size: dest.write_bytes(b"dummy")  # type: ignore[assignment]
+
+    with pytest.raises(ValueError, match="advertised RHTL provenance is malformed JSON"):
+        fetcher.fetch("pkg-malformed", "1.0.0", tmp_path, registries="rhtl")
+
+
+
+
