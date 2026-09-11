@@ -16,6 +16,7 @@ limitations under the License.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ from typing import Optional
 import httpx
 
 from taisce_cuan.sdist import canonicalize_name, compute_sha256
+from taisce_cuan.utils import is_https_url
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +50,52 @@ class SdistSourceInfo:
     size: int
     upload_time: Optional[str]
     provenance_url: Optional[str] = None
+
+
+def provenance_state(selected: SdistSourceInfo) -> str:
+    """Classify the provenance backing the selected sdist, regardless of registry.
+
+    - "advertised":     the registry published a PEP 740 provenance URL.
+    - "not-advertised": the registry published no provenance URL (url is None).
+
+    Raises:
+        ValueError: if a provenance URL is present but malformed -- an empty
+            string, a syntactically invalid URL, or a non-https URL.
+    """
+    if selected.provenance_url is None:
+        return "not-advertised"
+    if not is_https_url(selected.provenance_url):
+        raise ValueError(
+            f"Invalid provenance URL advertised by registry '{selected.registry}': "
+            f"{selected.provenance_url!r} (must be a valid https URL)"
+        )
+    return "advertised"
+
+
+def write_source_origin(
+    output_dir: Path,
+    package: str,
+    version: str,
+    selected: SdistSourceInfo,
+    state: str,
+) -> Path:
+    """Record where the sdist came from and its provenance state as source-origin.json."""
+    origin = {
+        "schema": "https://lightwell.dev/schemas/source-origin/v1",
+        "package": package,
+        "version": version,
+        "registry": selected.registry,
+        "download_url": selected.download_url,
+        "sha256": selected.sha256,
+        "size": selected.size,
+        "provenance": {
+            "state": state,
+            "url": selected.provenance_url,
+        },
+    }
+    path = output_dir / "source-origin.json"
+    path.write_text(json.dumps(origin, indent=2, sort_keys=True) + "\n")
+    return path
 
 
 class SdistFetcher:
@@ -190,4 +238,9 @@ class SdistFetcher:
             )
 
         logger.info(f"Verified {dest_file.name} (sha256: {actual_sha256})")
+
+        # Record where the sdist came from and its RHTL provenance state.
+        state = provenance_state(target_info)
+        write_source_origin(output_dir, package, version, target_info, state)
+
         return dest_file, target_info, pypi_info

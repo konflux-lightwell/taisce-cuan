@@ -2,6 +2,7 @@ import tarfile
 import pytest
 from pathlib import Path
 from taisce_cuan.sdist import canonicalize_name, compute_sha256, extract_sdist_to_source
+from taisce_cuan.fetcher import SdistSourceInfo, provenance_state
 
 
 def test_canonicalize_name():
@@ -106,6 +107,37 @@ def test_fetcher_missing_sha256_fail_closed(tmp_path: Path):
     )
     with pytest.raises(ValueError, match="No SHA-256 digest provided"):
         fetcher.fetch("foo", "1.0.0", tmp_path, registries="rhtl")
+
+
+def _source_info(registry: str, provenance_url):
+    return SdistSourceInfo(
+        registry=registry,
+        download_url="https://example.com/foo.tar.gz",
+        sha256="deadbeef",
+        size=100,
+        upload_time=None,
+        provenance_url=provenance_url,
+    )
+
+
+def test_provenance_state_not_advertised_only_when_none():
+    assert provenance_state(_source_info("rhtl", None)) == "not-advertised"
+    assert provenance_state(_source_info("pypi.org", None)) == "not-advertised"
+
+
+def test_provenance_state_advertised_for_any_registry():
+    prov = "https://example.com/foo.tar.gz.provenance"
+    assert provenance_state(_source_info("rhtl", prov)) == "advertised"
+    assert provenance_state(_source_info("pypi.org", prov)) == "advertised"
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    ["", "   ", "not a url", "http://example.com/prov", "ftp://example.com/prov"],
+)
+def test_provenance_state_rejects_malformed_url(bad_url):
+    with pytest.raises(ValueError, match="Invalid provenance URL"):
+        provenance_state(_source_info("rhtl", bad_url))
 
 
 def test_inspect_sdist_metadata_tarball(tmp_path: Path):
