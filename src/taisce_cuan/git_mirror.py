@@ -211,7 +211,7 @@ class GitMirrorPublisher:
         sign_key: Optional[str],
         output_provenance_file: Path,
     ) -> Optional[Path]:
-        """Create a signed attestation via cosign if signing key is provided (fail-closed)."""
+        """Create a signed attestation with the configured Cosign signing policy."""
         key_str = (sign_key or "").strip()
         if not key_str:
             logger.debug("No sign_key provided to sign_attestation; skipping")
@@ -245,7 +245,6 @@ class GitMirrorPublisher:
                 "--type=https://slsa.dev/provenance/v1",
                 f"--key={key_str}",
                 "--yes",
-                "--tlog-upload=false",
                 f"--output-file={output_provenance_file}",
             ]
             res = subprocess.run(cmd, capture_output=True, text=True, check=False)
