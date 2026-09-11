@@ -271,7 +271,7 @@ class GitMirrorPublisher:
         provenance_path: Optional[Path] = None,
         dry_run: bool = False,
     ) -> str:
-        """Explode source archive, maintain SemVer topology, record metadata/signing, commit, tag, and push."""
+        """Publish normalized source plus the fixed provenance carrier evidence."""
         canonical = canonicalize_name(package)
         tag_name = f"{canonical}/{version}"
         target_ver = parse_version_safe(version)
@@ -281,6 +281,41 @@ class GitMirrorPublisher:
         repo_dir.mkdir(parents=True, exist_ok=True)
 
         source_sha256 = compute_sha256(source_path)
+        carrier_root = source_path.parent.parent if source_path.parent.name == "downloads" else source_path.parent
+        origin_file = carrier_root / "source-origin.json"
+        transformation_file = carrier_root / "sdist-transformation.json"
+        generated_origin = False
+        if not origin_file.is_file():
+            if dry_run:
+                origin_file.write_text(json.dumps({"acquired": {"sha256": source_sha256, "registry": source_registry}}))
+                generated_origin = True
+            else:
+                raise ValueError("source-origin.json is required beside the normalized sdist")
+        try:
+            origin = json.loads(origin_file.read_text())
+        except json.JSONDecodeError as exc:
+            raise ValueError("source-origin.json is not valid JSON") from exc
+        acquired = origin.get("acquired", {})
+        if not acquired.get("sha256"):
+            raise ValueError("source-origin.json lacks acquired digest")
+        original_archive = carrier_root / "downloads" / f"{canonical}-{version}.tar.gz"
+        if original_archive.is_file() and compute_sha256(original_archive) != acquired["sha256"]:
+            raise ValueError("original archive digest does not match source-origin acquired digest")
+        generated_transformation = False
+        if not transformation_file.is_file():
+            if dry_run:
+                transformation_file.write_text(json.dumps({"output_sha256": source_sha256}))
+                generated_transformation = True
+            else:
+                raise ValueError("sdist-transformation.json is required beside the normalized sdist")
+        transformation = json.loads(transformation_file.read_text())
+        output_digest = transformation.get("output", {}).get("sha256") or transformation.get("output_sha256")
+        if output_digest and output_digest != source_sha256 and not (generated_transformation or generated_origin):
+            raise ValueError("sdist transformation output digest does not match normalized sdist")
+        acquired_digest = transformation.get("input", {}).get("sha256") or transformation.get("input_sha256")
+        if acquired_digest and acquired_digest != acquired.get("sha256") and not generated_transformation:
+            raise ValueError("sdist transformation input does not match acquired digest")
+        source_registry = acquired.get("registry", source_registry)
         logger.info(f"Publishing {package} {version} ({source_sha256}) to {repo_name}")
 
         # Git init if repo not present
@@ -387,9 +422,16 @@ class GitMirrorPublisher:
             shutil.rmtree(source_dir)
         extract_sdist_to_source(source_path, source_dir)
 
-        # Prepare .lightwell/metadata.json
+        # Prepare .lightwell/metadata.json and preserve the fixed carrier evidence.
         lightwell_dir = repo_dir / ".lightwell"
         lightwell_dir.mkdir(exist_ok=True)
+        for evidence_name in ("source-origin.json", "sdist-transformation.json", "rhtl-index.pep691.json", "provenance.pep740.json"):
+            evidence = carrier_root / evidence_name
+            if evidence.is_file():
+                shutil.copyfile(evidence, lightwell_dir / evidence_name)
+        # RHTL provenance is an advertised endpoint only; never emit provenance.dsse.
+        if source_registry == "rhtl":
+            (lightwell_dir / "provenance.dsse").unlink(missing_ok=True)
         metadata_file = lightwell_dir / "metadata.json"
 
         now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
