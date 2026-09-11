@@ -610,6 +610,44 @@ def test_provenance_carrier_is_published_with_normalized_sdist(tmp_path: Path):
     assert not (repo_dir / ".lightwell" / "provenance.json").exists()
 
 
+def test_rhtl_metadata_binds_validated_closure_and_registry(tmp_path: Path, monkeypatch):
+    source_file = create_sample_source(tmp_path, "rhtl-pkg", "1.0.0")
+    carrier = source_file.parent
+    origin_path = carrier / "source-origin.json"
+    origin = json.loads(origin_path.read_text())
+    origin["acquired"]["registry"] = "rhtl"
+    origin["provenance"] = {"mode": "rhtl", "advertised": True,
+                             "sha256": "placeholder", "rhtl": {"status": "advertised"}}
+    raw = carrier / "provenance.pep740.json"
+    raw.write_text(json.dumps({"attestation_bundles": [{"attestations": [{"envelope": {
+        "statement": "cGF5bG9hZA==", "signature": "c2ln"}}]}]}))
+    import hashlib
+    origin["provenance"]["sha256"] = hashlib.sha256(raw.read_bytes()).hexdigest()
+    origin_path.write_text(json.dumps(origin, sort_keys=True) + "\n")
+    transformation_path = carrier / "sdist-transformation.json"
+    transformation = json.loads(transformation_path.read_text())
+    transformation["source_origin_sha256"] = hashlib.sha256(origin_path.read_bytes()).hexdigest()
+    transformation_path.write_text(json.dumps(transformation, sort_keys=True) + "\n")
+    monkeypatch.setattr(GitMirrorPublisher, "verify_blob_attestation", staticmethod(lambda *args: None))
+
+    workspace = tmp_path / "workspace"
+    GitMirrorPublisher(forge_url="https://forge.example.com", group="testgroup").publish_source(
+        source_path=source_file, package="rhtl-pkg", version="1.0.0",
+        workspace_dir=workspace, source_registry="pypi.org", dry_run=True)
+    # Repository naming remains compatible with the existing mirror layout.
+    repo = workspace / "pypi.org-rhtl-pkg"
+    meta = json.loads((repo / ".lightwell" / "metadata.json").read_text())
+    build = meta["predicate"]["buildDefinition"]
+    assert build["externalParameters"]["upstream_registry"] == "rhtl"
+    deps = {item["annotations"]["role"]: item for item in build["resolvedDependencies"]}
+    assert {"lightwell-source-origin", "lightwell-sdist-transformation",
+            "upstream-acquired-sdist", "lightwell-normalized-sdist",
+            "upstream-rhtl-pep740", "adapted-rhtl-dsse"} <= deps.keys()
+    assert all(item["digest"].get("sha256") for item in deps.values())
+    assert not any("pypi" in item["name"].lower() for item in build["resolvedDependencies"])
+    assert meta["predicate"]["runDetails"]["metadata"]["attestation_level"] == "unsigned-inventory"
+
+
 def test_legacy_provenance_is_not_converted_or_published(tmp_path: Path):
     source_file = create_sample_source(tmp_path, "legacy-provenance", "1.0.0")
     legacy = source_file.parent / "sdist-provenance.json"

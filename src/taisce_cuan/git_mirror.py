@@ -496,6 +496,13 @@ class GitMirrorPublisher:
             evidence = carrier_root / evidence_name
             if evidence.is_file():
                 shutil.copyfile(evidence, lightwell_dir / evidence_name)
+        # Keep the exact acquired and normalized archives in the final mirror so
+        # every resolved dependency is a local, digestable closure member.
+        final_downloads = lightwell_dir / "downloads"
+        final_downloads.mkdir(exist_ok=True)
+        shutil.copyfile(original_archive, final_downloads / original_archive.name)
+        normalized_archive = lightwell_dir / source_path.name
+        shutil.copyfile(source_path, normalized_archive)
         if source_registry == "rhtl":
             (lightwell_dir / "provenance.dsse").unlink(missing_ok=True)
         metadata_file = lightwell_dir / "metadata.json"
@@ -506,15 +513,37 @@ class GitMirrorPublisher:
         # an implementation detail of the mirror and is not source provenance.
         subjects = [Subject(name=f"{canonical}-{version}.tar.gz", digest={"sha256": source_sha256})]
 
+        # Bind the final local mirror closure, rather than only the upstream
+        # download URL.  These paths are deterministic and remain valid after
+        # the Git tree is created (the tree itself is deliberately not signed).
         resolved_deps: List[ResolvedDependency] = []
-        if upstream_pypi_url:
-            resolved_deps.append(
-                ResolvedDependency(
-                    name=f"{canonical}-{version}.tar.gz (pypi.org)",
-                    uri=upstream_pypi_url,
-                    digest={"sha256": upstream_pypi_sha256 or source_sha256},
-                )
-            )
+
+        def bind(path: Path, role: str, name: Optional[str] = None, **annotations: Any) -> None:
+            relative = path.relative_to(repo_dir).as_posix()
+            resolved_deps.append(ResolvedDependency(
+                name=name or relative,
+                uri=f"./{relative}",
+                digest={"sha256": compute_sha256(path)},
+                annotations={"role": role, **annotations},
+            ))
+
+        bind(lightwell_dir / "source-origin.json", "lightwell-source-origin")
+        bind(lightwell_dir / "sdist-transformation.json", "lightwell-sdist-transformation")
+        bind(final_downloads / original_archive.name, "upstream-acquired-sdist", registry=source_registry)
+        bind(normalized_archive, "lightwell-normalized-sdist")
+
+        if source_registry in {"rhtl", "packages.redhat.com"}:
+            advertised = bool(provenance.get("advertised"))
+            index_file = lightwell_dir / "rhtl-index.pep691.json"
+            raw_file = lightwell_dir / "provenance.pep740.json"
+            adapted_file = lightwell_dir / "provenance.dsse.json"
+            if advertised:
+                bind(raw_file, "upstream-rhtl-pep740")
+                bind(adapted_file, "adapted-rhtl-dsse")
+            else:
+                if not index_file.is_file():
+                    raise ValueError("not-advertised RHTL provenance requires PEP 691 index evidence")
+                bind(index_file, "upstream-rhtl-pep691")
 
         metadata = IngestionMetadata(
             subject=subjects,
@@ -524,6 +553,7 @@ class GitMirrorPublisher:
                         package=package,
                         canonical_name=canonical,
                         version=version,
+                        upstream_registry=source_registry,
                     ),
                     resolvedDependencies=resolved_deps,
                 ),
@@ -532,6 +562,12 @@ class GitMirrorPublisher:
                     metadata=RunDetailsMetadata(
                         startedOn=now_str,
                         finishedOn=now_str,
+                        attestation_level="signed" if sign_key else "unsigned-inventory",
+                        note=(
+                            "Signed Lightwell metadata attestation."
+                            if sign_key
+                            else "Unsigned SLSA Build Provenance inventory (dry-run; no release fallback)."
+                        ),
                         lightwell_builds=LightwellBuildsInfo(
                             repo=repo_name,
                             source_registry_used=source_registry,
