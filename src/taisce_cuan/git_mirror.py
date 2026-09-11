@@ -281,41 +281,62 @@ class GitMirrorPublisher:
         repo_dir.mkdir(parents=True, exist_ok=True)
 
         source_sha256 = compute_sha256(source_path)
-        carrier_root = source_path.parent.parent if source_path.parent.name == "downloads" else source_path.parent
+        carrier_root = source_path.parent.parent if source_path.parent.name in {"downloads", "output-root"} else source_path.parent
         origin_file = carrier_root / "source-origin.json"
         transformation_file = carrier_root / "sdist-transformation.json"
-        generated_origin = False
         if not origin_file.is_file():
-            if dry_run:
-                origin_file.write_text(json.dumps({"acquired": {"sha256": source_sha256, "registry": source_registry}}))
-                generated_origin = True
-            else:
-                raise ValueError("source-origin.json is required beside the normalized sdist")
+            raise ValueError("source-origin.json is required beside the normalized sdist")
+        if not transformation_file.is_file():
+            raise ValueError("sdist-transformation.json is required beside the normalized sdist")
         try:
             origin = json.loads(origin_file.read_text())
-        except json.JSONDecodeError as exc:
-            raise ValueError("source-origin.json is not valid JSON") from exc
+            transformation = json.loads(transformation_file.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("source provenance carrier contains invalid JSON") from exc
         acquired = origin.get("acquired", {})
-        if not acquired.get("sha256"):
+        acquired_digest = acquired.get("sha256")
+        acquired_path = acquired.get("path") or acquired.get("filename")
+        if not isinstance(acquired_digest, str) or not acquired_digest:
             raise ValueError("source-origin.json lacks acquired digest")
-        original_archive = carrier_root / "downloads" / f"{canonical}-{version}.tar.gz"
-        if original_archive.is_file() and compute_sha256(original_archive) != acquired["sha256"]:
+        original_archive = carrier_root / (acquired_path or f"downloads/{canonical}-{version}.tar.gz")
+        if original_archive.parent != carrier_root / "downloads" or not original_archive.is_file():
+            raise ValueError("source provenance carrier is missing downloads/original sdist")
+        if acquired_path and Path(acquired_path).name != original_archive.name:
+            raise ValueError("source-origin acquired path does not match carried original archive")
+        if compute_sha256(original_archive) != acquired_digest:
             raise ValueError("original archive digest does not match source-origin acquired digest")
-        generated_transformation = False
-        if not transformation_file.is_file():
-            if dry_run:
-                transformation_file.write_text(json.dumps({"output_sha256": source_sha256}))
-                generated_transformation = True
-            else:
-                raise ValueError("sdist-transformation.json is required beside the normalized sdist")
-        transformation = json.loads(transformation_file.read_text())
-        output_digest = transformation.get("output", {}).get("sha256") or transformation.get("output_sha256")
-        if output_digest and output_digest != source_sha256 and not (generated_transformation or generated_origin):
-            raise ValueError("sdist transformation output digest does not match normalized sdist")
-        acquired_digest = transformation.get("input", {}).get("sha256") or transformation.get("input_sha256")
-        if acquired_digest and acquired_digest != acquired.get("sha256") and not generated_transformation:
+        output = transformation.get("output", {})
+        transform_input = transformation.get("input", {})
+        output_digest = output.get("sha256") or transformation.get("output_sha256")
+        transform_input_digest = transform_input.get("sha256") or transformation.get("input_sha256")
+        origin_digest = transformation.get("source_origin_sha256") or transformation.get("source_origin", {}).get("sha256")
+        output_path = output.get("path") or transformation.get("output_path")
+        if not all(isinstance(value, str) and value for value in (output_digest, transform_input_digest, origin_digest)):
+            raise ValueError("sdist-transformation.json must contain input, output, and source-origin digests")
+        if transform_input_digest != acquired_digest:
             raise ValueError("sdist transformation input does not match acquired digest")
+        if output_digest != source_sha256:
+            raise ValueError("sdist transformation output does not match normalized sdist")
+        if output_path and Path(output_path).name != source_path.name:
+            raise ValueError("sdist transformation output path does not match normalized sdist")
+        if origin_digest != compute_sha256(origin_file):
+            raise ValueError("sdist transformation source-origin digest does not match source-origin.json")
+        provenance = origin.get("provenance", {})
+        provenance_mode = provenance.get("mode")
+        if provenance_mode not in {"pypi", "rhtl", "pypi-slsa-v1", "rhtl-pep740"}:
+            raise ValueError("source-origin provenance mode is missing or unsupported")
         source_registry = acquired.get("registry", source_registry)
+        if source_registry not in {"pypi.org", "rhtl", "packages.redhat.com"}:
+            raise ValueError("source-origin registry is unsupported")
+        evidence_digests = {
+            "rhtl-index.pep691.json": provenance.get("rhtl", {}).get("evidence", {}).get("sha256"),
+            "provenance.pep740.json": provenance.get("sha256"),
+        }
+        for evidence_name, expected_digest in evidence_digests.items():
+            if expected_digest:
+                evidence = carrier_root / evidence_name
+                if not evidence.is_file() or compute_sha256(evidence) != expected_digest:
+                    raise ValueError(f"{evidence_name} does not match source-origin provenance digest")
         logger.info(f"Publishing {package} {version} ({source_sha256}) to {repo_name}")
 
         # Git init if repo not present
@@ -436,10 +457,9 @@ class GitMirrorPublisher:
 
         now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        subjects = [
-            Subject(name=f"{canonical}-{version}.tar.gz", digest={"sha256": source_sha256}),
-            Subject(name="source/", digest={"gitTree": "pending"}),
-        ]
+        # The normalized archive is the sole published subject.  A Git tree is
+        # an implementation detail of the mirror and is not source provenance.
+        subjects = [Subject(name=f"{canonical}-{version}.tar.gz", digest={"sha256": source_sha256})]
 
         resolved_deps: List[ResolvedDependency] = []
         if upstream_pypi_url:
@@ -480,58 +500,33 @@ class GitMirrorPublisher:
         with open(metadata_file, "w") as f:
             f.write(metadata.model_dump_json(by_alias=True, exclude_none=True, indent=2))
 
+        # Metadata is published from its archive digest; never expose a Git
+        # tree OID. Native metadata is signed on every route. Only PyPI gets a
+        # Lightwell archive-provenance DSSE; RHTL evidence remains opaque.
+        if sign_key:
+            self.sign_attestation(
+                metadata=metadata,
+                source_file=metadata_file,
+                sign_key=sign_key,
+                output_provenance_file=lightwell_dir / "metadata.dsse",
+            )
+            if source_registry != "rhtl":
+                self.sign_attestation(
+                    metadata=metadata,
+                    source_file=source_path,
+                    sign_key=sign_key,
+                    output_provenance_file=lightwell_dir / "provenance.dsse",
+                )
+
         # Git stage and commit initial state
         subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
         commit_msg = f"ingest: {canonical} {version} from {source_registry}\n\nsha256: {source_sha256}"
         subprocess.run(["git", "commit", "-m", commit_msg], cwd=repo_dir, check=True)
 
-        # Compute git tree sha and amend metadata
-        tree_res = subprocess.run(
-            ["git", "ls-tree", "HEAD", "source"],
-            cwd=repo_dir,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        git_tree_sha = tree_res.stdout.split()[2] if len(tree_res.stdout.split()) >= 3 else ""
-
-        if git_tree_sha:
-            metadata.subject[1].digest = {"gitTree": git_tree_sha}
-            with open(metadata_file, "w") as f:
-                f.write(metadata.model_dump_json(by_alias=True, exclude_none=True, indent=2))
-            subprocess.run(["git", "add", str(metadata_file)], cwd=repo_dir, check=True)
-
-        # Provenance Resolution (Tier 1: Embedded sdist provenance -> Tier 2: Chains provenance)
-        provenance_target = lightwell_dir / "provenance.json"
-        resolved_prov = resolve_provenance_file(
-            source_path=source_path,
-            provenance_path=provenance_path,
-        )
-
-        if resolved_prov is not None:
-            resolved_path, tier_desc = resolved_prov
-            shutil.copyfile(resolved_path, provenance_target)
-            subprocess.run(["git", "add", str(provenance_target)], cwd=repo_dir, check=True)
-            logger.info(f"Resolved {tier_desc} from {resolved_path}; copied to {provenance_target}")
-        elif sign_key:
-            logger.info("Signing key provided; generating signed attestation")
-            self.sign_attestation(
-                metadata=metadata,
-                source_file=source_path,
-                sign_key=sign_key,
-                output_provenance_file=provenance_target,
-            )
-            subprocess.run(["git", "add", "-A", str(lightwell_dir)], cwd=repo_dir, check=True)
-        else:
-            logger.info("No provenance found and no signing key provided; recording unsigned inventory")
-
-        # Amend commit with updated metadata and signature
-        subprocess.run(["git", "commit", "--amend", "--no-edit"], cwd=repo_dir, check=True)
-
         # Tag creation
         tag_flag = ["-f"] if allow_overwrite else []
         subprocess.run(["git", "tag", *tag_flag, tag_name], cwd=repo_dir, check=True)
-        logger.info(f"Tagged {tag_name} (gitTree: {git_tree_sha}) on branch {target_branch}")
+        logger.info(f"Tagged {tag_name} on branch {target_branch}")
 
         # Baseline tag creation (ADR-0005 initial baseline anchor)
         baseline_tag = f"baseline/{version}"
