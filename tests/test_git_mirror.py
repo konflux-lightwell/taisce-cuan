@@ -528,6 +528,74 @@ def test_two_tier_provenance_resolution_tier2_chains(tmp_path: Path):
     assert "tier2 chains pipelinerun provenance" in saved_prov.read_text()
 
 
+def test_rhtl_evidence_carried_forward(tmp_path: Path):
+    import hashlib
+
+    source_file = create_sample_source(tmp_path, "rhtl-pkg", "1.0.0")
+    # Evidence written beside the sdist by the fetch step (advertised case).
+    evidence = {
+        "source-origin.json": '{"registry": "rhtl"}',
+        "rhtl-index.pep691.json": '{"files": []}',
+        "provenance.pep740.json": '{"attestations": []}',
+    }
+    for name, content in evidence.items():
+        (tmp_path / name).write_text(content)
+
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com",
+        group="testgroup",
+        committer_name="bot",
+        committer_email="bot@example.com",
+    )
+    publisher.publish_source(
+        source_path=source_file,
+        package="rhtl-pkg",
+        version="1.0.0",
+        workspace_dir=workspace,
+        dry_run=True,
+    )
+
+    lightwell = workspace / "pypi.org-rhtl-pkg" / ".lightwell"
+    # 1. Raw evidence files are preserved verbatim in .lightwell/
+    for name, content in evidence.items():
+        assert (lightwell / name).read_text() == content
+
+    # 2. Each evidence file is recorded in the signed predicate with its sha256
+    meta = json.loads((lightwell / "metadata.json").read_text())
+    deps = {
+        d["name"]: d
+        for d in meta["predicate"]["buildDefinition"]["resolvedDependencies"]
+    }
+    for name, content in evidence.items():
+        expected = hashlib.sha256(content.encode()).hexdigest()
+        assert deps[name]["digest"]["sha256"] == expected
+        assert deps[name]["annotations"]["role"] == "rhtl-provenance-evidence"
+
+
+def test_no_rhtl_evidence_is_optional(tmp_path: Path):
+    # Publishing without any evidence files beside the sdist must still succeed.
+    source_file = create_sample_source(tmp_path, "bare-pkg", "1.0.0")
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com",
+        group="testgroup",
+        committer_name="bot",
+        committer_email="bot@example.com",
+    )
+    publisher.publish_source(
+        source_path=source_file,
+        package="bare-pkg",
+        version="1.0.0",
+        workspace_dir=workspace,
+        dry_run=True,
+    )
+
+    lightwell = workspace / "pypi.org-bare-pkg" / ".lightwell"
+    assert (lightwell / "metadata.json").exists()
+    assert not (lightwell / "source-origin.json").exists()
+
+
 def test_cli_push_auto_discover_metadata(tmp_path: Path):
     from taisce_cuan.cli import main
     source_file = create_sample_source(tmp_path, "auto-disc-pkg", "3.2.1")

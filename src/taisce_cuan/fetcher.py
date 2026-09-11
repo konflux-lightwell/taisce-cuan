@@ -16,6 +16,7 @@ limitations under the License.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ from typing import Optional
 import httpx
 
 from taisce_cuan.sdist import canonicalize_name, compute_sha256
+from taisce_cuan.utils import is_https_url
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,52 @@ class SdistSourceInfo:
     provenance_url: Optional[str] = None
 
 
+def provenance_state(selected: SdistSourceInfo) -> str:
+    """Classify the provenance backing the selected sdist, regardless of registry.
+
+    - "advertised":     the registry published a PEP 740 provenance URL.
+    - "not-advertised": the registry published no provenance URL (url is None).
+
+    Raises:
+        ValueError: if a provenance URL is present but malformed -- an empty
+            string, a syntactically invalid URL, or a non-https URL.
+    """
+    if selected.provenance_url is None:
+        return "not-advertised"
+    if not is_https_url(selected.provenance_url):
+        raise ValueError(
+            f"Invalid provenance URL advertised by registry '{selected.registry}': "
+            f"{selected.provenance_url!r} (must be a valid https URL)"
+        )
+    return "advertised"
+
+
+def write_source_origin(
+    output_dir: Path,
+    package: str,
+    version: str,
+    selected: SdistSourceInfo,
+    state: str,
+) -> Path:
+    """Record where the sdist came from and its provenance state as source-origin.json."""
+    origin = {
+        "schema": "https://lightwell.dev/schemas/source-origin/v1",
+        "package": package,
+        "version": version,
+        "registry": selected.registry,
+        "download_url": selected.download_url,
+        "sha256": selected.sha256,
+        "size": selected.size,
+        "provenance": {
+            "state": state,
+            "url": selected.provenance_url,
+        },
+    }
+    path = output_dir / "source-origin.json"
+    path.write_text(json.dumps(origin, indent=2, sort_keys=True) + "\n")
+    return path
+
+
 class SdistFetcher:
     """Resolves and downloads sdists from RHTL and PyPI."""
 
@@ -63,8 +111,14 @@ class SdistFetcher:
         self.pypi_api_url = pypi_api_url.rstrip("/")
         self._client = client or httpx.Client(timeout=30.0, follow_redirects=True)
 
-    def query_rhtl(self, package: str, version: str) -> Optional[SdistSourceInfo]:
-        """Query RHTL PEP 691 Simple JSON index for the package version."""
+    def query_rhtl(
+        self, package: str, version: str
+    ) -> tuple[Optional[SdistSourceInfo], Optional[bytes]]:
+        """Query RHTL PEP 691 index; return (matching sdist info, raw index bytes).
+
+        The raw index bytes are returned whenever RHTL responds 200 so they can be
+        preserved verbatim as provenance evidence, even if no matching file is found.
+        """
         canonical = canonicalize_name(package)
         url = f"{self.rhtl_simple_url}/{canonical}/"
         headers = {"Accept": "application/vnd.pypi.simple.v1+json"}
@@ -72,7 +126,8 @@ class SdistFetcher:
         try:
             resp = self._client.get(url, headers=headers)
             if resp.status_code != 200:
-                return None
+                return None, None
+            raw_index = resp.content
             data = resp.json()
             pattern = re.compile(
                 rf"^{re.escape(canonical).replace('-', '[-_.]')}-{re.escape(version)}\.tar\.gz$",
@@ -88,10 +143,11 @@ class SdistFetcher:
                         size=file_entry.get("size", 0),
                         upload_time=file_entry.get("upload-time"),
                         provenance_url=file_entry.get("provenance"),
-                    )
+                    ), raw_index
+            return None, raw_index
         except Exception as e:
             logger.warning(f"Error querying RHTL for {package} {version}: {e}")
-        return None
+        return None, None
 
     def query_pypi(self, package: str, version: str) -> Optional[SdistSourceInfo]:
         """Query PyPI JSON API for the package version."""
@@ -147,12 +203,15 @@ class SdistFetcher:
 
         target_info: Optional[SdistSourceInfo] = None
         rhtl_info: Optional[SdistSourceInfo] = None
+        rhtl_index: Optional[bytes] = None
+        rhtl_queried = False
         pypi_info: Optional[SdistSourceInfo] = None
 
         for reg in req_regs:
             if reg in ("rhtl", "packages.redhat.com"):
-                if rhtl_info is None:
-                    rhtl_info = self.query_rhtl(package, version)
+                if not rhtl_queried:
+                    rhtl_info, rhtl_index = self.query_rhtl(package, version)
+                    rhtl_queried = True
                 if rhtl_info:
                     target_info = rhtl_info
                     break
@@ -190,4 +249,16 @@ class SdistFetcher:
             )
 
         logger.info(f"Verified {dest_file.name} (sha256: {actual_sha256})")
+
+        # Record where the sdist came from and its RHTL provenance state.
+        state = provenance_state(target_info)
+        if target_info.registry == "rhtl" and rhtl_index is not None:
+            (output_dir / "rhtl-index.pep691.json").write_bytes(rhtl_index)
+        if state == "advertised":
+            # RHTL advertised provenance: preserve the raw PEP 740 blob (fail-closed).
+            prov_resp = self._client.get(target_info.provenance_url)
+            prov_resp.raise_for_status()
+            (output_dir / "provenance.pep740.json").write_bytes(prov_resp.content)
+        write_source_origin(output_dir, package, version, target_info, state)
+
         return dest_file, target_info, pypi_info
