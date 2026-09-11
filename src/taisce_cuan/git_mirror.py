@@ -390,6 +390,16 @@ class GitMirrorPublisher:
         # Prepare .lightwell/metadata.json
         lightwell_dir = repo_dir / ".lightwell"
         lightwell_dir.mkdir(exist_ok=True)
+
+        # Carry forward the raw RHTL provenance evidence written beside the sdist at fetch time.
+        carrier_dir = source_path.parent
+        preserved_evidence: List[Tuple[str, str]] = []
+        for evidence_name in ("source-origin.json", "rhtl-index.pep691.json", "provenance.pep740.json"):
+            evidence_src = carrier_dir / evidence_name
+            if evidence_src.is_file():
+                shutil.copyfile(evidence_src, lightwell_dir / evidence_name)
+                preserved_evidence.append((evidence_name, compute_sha256(evidence_src)))
+
         metadata_file = lightwell_dir / "metadata.json"
 
         now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -406,6 +416,15 @@ class GitMirrorPublisher:
                     name=f"{canonical}-{version}.tar.gz (pypi.org)",
                     uri=upstream_pypi_url,
                     digest={"sha256": upstream_pypi_sha256 or source_sha256},
+                )
+            )
+        for evidence_name, evidence_sha256 in preserved_evidence:
+            resolved_deps.append(
+                ResolvedDependency(
+                    name=evidence_name,
+                    uri=f".lightwell/{evidence_name}",
+                    digest={"sha256": evidence_sha256},
+                    annotations={"role": "rhtl-provenance-evidence"},
                 )
             )
 
