@@ -84,6 +84,10 @@ spec:
       description: Name of secret containing SIGN_KEY, PUBLIC_KEY, and/or cosign credentials (optional).
       type: string
       default: konflux-cosign-signing-production
+    - name: rhtlPredicateType
+      description: Expected predicate type for RHTL provenance verification (optional).
+      type: string
+      default: ""
     - name: gitSecretName
       description: Name of the basic-auth secret containing Git forge credentials.
       type: string
@@ -332,6 +336,10 @@ spec:
           ARGS+=("--sign-key=/etc/signing-secret/key.pem")
         elif [ -f "/etc/signing-secret/cosign.key" ]; then
           ARGS+=("--sign-key=/etc/signing-secret/cosign.key")
+        fi
+
+        if [ -n "$(params.rhtlPredicateType)" ]; then
+          ARGS+=("--rhtl-predicate-type=$(params.rhtlPredicateType)")
         fi
 
         taisce-cuan push "${ARGS[@]}"

@@ -16,6 +16,7 @@ limitations under the License.
 
 from __future__ import annotations
 
+import base64
 import datetime
 import json
 import logging
@@ -53,6 +54,10 @@ def parse_version_safe(ver_str: str) -> Optional[Version]:
         return Version(ver_str)
     except InvalidVersion:
         return None
+
+
+def _is_rhtl_registry(registry: Optional[str]) -> bool:
+    return (registry or "").strip().lower() in {"rhtl", "packages.redhat.com"}
 
 
 def resolve_provenance_file(
@@ -209,16 +214,28 @@ class GitMirrorPublisher:
         """Adapt an RHTL PEP 740 envelope without decoding its signed values."""
         try:
             document = json.loads(raw_path.read_bytes())
+            if not isinstance(document, dict):
+                raise ValueError("RHTL PEP 740 evidence is malformed")
             bundles = document.get("attestation_bundles")
             if not isinstance(bundles, list) or len(bundles) != 1:
                 raise ValueError("RHTL PEP 740 evidence must contain exactly one attestation bundle")
+            if not isinstance(bundles[0], dict):
+                raise ValueError("RHTL PEP 740 evidence is malformed")
             attestations = bundles[0].get("attestations")
             if not isinstance(attestations, list) or len(attestations) != 1:
                 raise ValueError("RHTL PEP 740 evidence must contain exactly one attestation")
-            envelope = attestations[0].get("envelope", {})
+            if not isinstance(attestations[0], dict):
+                raise ValueError("RHTL PEP 740 evidence is malformed")
+            envelope = attestations[0].get("envelope")
+            if not isinstance(envelope, dict):
+                raise ValueError("RHTL PEP 740 evidence is malformed")
             payload = envelope.get("statement")
             signature = envelope.get("signature")
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, IndexError, TypeError, AttributeError) as exc:
+            if isinstance(exc, json.JSONDecodeError):
+                raise ValueError("RHTL PEP 740 evidence is malformed") from exc
+            if isinstance(exc, ValueError):
+                raise
             raise ValueError("RHTL PEP 740 evidence is malformed") from exc
         if not isinstance(payload, str) or not isinstance(signature, str) or not payload or not signature:
             raise ValueError("RHTL PEP 740 envelope has invalid payload or signature")
@@ -229,6 +246,24 @@ class GitMirrorPublisher:
             "signatures": [{"sig": signature}],
         }, separators=(",", ":")) + "\n")
         return output_path
+
+    @staticmethod
+    def extract_pep740_predicate_type(raw_path: Path) -> Optional[str]:
+        """Extract the in-toto predicateType from an RHTL PEP 740 attestation statement."""
+        try:
+            document = json.loads(raw_path.read_bytes())
+            bundles = document.get("attestation_bundles", [])
+            attestations = bundles[0].get("attestations", [])
+            envelope = attestations[0].get("envelope", {})
+            payload = envelope.get("statement")
+            if not isinstance(payload, str):
+                return None
+            stmt = json.loads(base64.b64decode(payload))
+            if isinstance(stmt, dict) and isinstance(stmt.get("predicateType"), str):
+                return stmt["predicateType"]
+        except Exception:
+            return None
+        return None
 
     @staticmethod
     def verify_blob_attestation(
@@ -312,13 +347,12 @@ class GitMirrorPublisher:
         package: str,
         version: str,
         workspace_dir: Path,
-        upstream_pypi_url: Optional[str] = None,
-        upstream_pypi_sha256: Optional[str] = None,
         source_registry: str = "pypi.org",
         allow_overwrite: bool = False,
         sign_key: Optional[str] = None,
         provenance_path: Optional[Path] = None,
         public_key: Optional[str] = None,
+        rhtl_predicate_type: Optional[str] = None,
         dry_run: bool = False,
     ) -> str:
         """Publish normalized source plus the fixed provenance carrier evidence."""
@@ -329,6 +363,8 @@ class GitMirrorPublisher:
         repo_name = f"pypi.org-{canonical}"
         repo_dir = workspace_dir / repo_name
         repo_dir.mkdir(parents=True, exist_ok=True)
+        lightwell_dir = repo_dir / ".lightwell"
+        lightwell_dir.mkdir(exist_ok=True)
 
         source_sha256 = compute_sha256(source_path)
         carrier_root = source_path.parent.parent if source_path.parent.name in {"downloads", "output-root"} else source_path.parent
@@ -376,7 +412,7 @@ class GitMirrorPublisher:
         if provenance_mode not in {"pypi", "rhtl", "pypi-slsa-v1", "rhtl-pep740"}:
             raise ValueError("source-origin provenance mode is missing or unsupported")
         source_registry = acquired.get("registry", source_registry)
-        if source_registry not in {"pypi.org", "rhtl", "packages.redhat.com"}:
+        if not _is_rhtl_registry(source_registry) and source_registry != "pypi.org":
             raise ValueError("source-origin registry is unsupported")
         evidence_digests = {
             "rhtl-index.pep691.json": provenance.get("rhtl", {}).get("evidence", {}).get("sha256"),
@@ -387,13 +423,30 @@ class GitMirrorPublisher:
                 evidence = carrier_root / evidence_name
                 if not evidence.is_file() or compute_sha256(evidence) != expected_digest:
                     raise ValueError(f"{evidence_name} does not match source-origin provenance digest")
-        raw_pep740 = carrier_root / "provenance.pep740.json"
-        adapted_pep740 = carrier_root / "provenance.dsse.json"
-        if source_registry in {"rhtl", "packages.redhat.com"} and raw_pep740.is_file():
-            self.adapt_rhtl_pep740(raw_pep740, adapted_pep740)
-            self.verify_blob_attestation(original_archive, adapted_pep740, public_key or os.getenv("PUBLIC_KEY", ""))
-        elif source_registry in {"rhtl", "packages.redhat.com"} and provenance.get("advertised"):
-            raise ValueError("advertised RHTL provenance evidence is missing")
+        is_rhtl = _is_rhtl_registry(source_registry)
+        is_advertised = bool(provenance.get("advertised"))
+        if is_rhtl:
+            if is_advertised:
+                raw_pep740 = carrier_root / "provenance.pep740.json"
+                if not raw_pep740.is_file():
+                    raise ValueError("advertised RHTL provenance evidence is missing")
+                adapted_pep740 = lightwell_dir / "provenance.dsse.json"
+                self.adapt_rhtl_pep740(raw_pep740, adapted_pep740)
+                effective_pred = (
+                    rhtl_predicate_type
+                    or self.extract_pep740_predicate_type(raw_pep740)
+                    or "https://slsa.dev/provenance/v1"
+                )
+                self.verify_blob_attestation(
+                    original_archive,
+                    adapted_pep740,
+                    public_key or "",
+                    effective_pred,
+                )
+            else:
+                index_file = carrier_root / "rhtl-index.pep691.json"
+                if not index_file.is_file():
+                    raise ValueError("not-advertised RHTL provenance requires PEP 691 index evidence")
         logger.info(f"Publishing {package} {version} ({source_sha256}) to {repo_name}")
 
         # Git init if repo not present
@@ -503,7 +556,7 @@ class GitMirrorPublisher:
         # Prepare .lightwell/metadata.json and preserve the fixed carrier evidence.
         lightwell_dir = repo_dir / ".lightwell"
         lightwell_dir.mkdir(exist_ok=True)
-        for evidence_name in ("source-origin.json", "sdist-transformation.json", "rhtl-index.pep691.json", "provenance.pep740.json", "provenance.dsse.json"):
+        for evidence_name in ("source-origin.json", "sdist-transformation.json"):
             evidence = carrier_root / evidence_name
             if evidence.is_file():
                 shutil.copyfile(evidence, lightwell_dir / evidence_name)
@@ -516,10 +569,21 @@ class GitMirrorPublisher:
         shutil.copyfile(source_path, normalized_archive)
         (lightwell_dir / "metadata.dsse").unlink(missing_ok=True)
         (lightwell_dir / "provenance.dsse").unlink(missing_ok=True)
-        if source_registry in {"rhtl", "packages.redhat.com"}:
-            (lightwell_dir / "provenance.dsse").unlink(missing_ok=True)
-            if not provenance.get("advertised"):
+        if is_rhtl:
+            if is_advertised:
+                shutil.copyfile(carrier_root / "provenance.pep740.json", lightwell_dir / "provenance.pep740.json")
+                (lightwell_dir / "rhtl-index.pep691.json").unlink(missing_ok=True)
+            else:
+                shutil.copyfile(carrier_root / "rhtl-index.pep691.json", lightwell_dir / "rhtl-index.pep691.json")
+                (lightwell_dir / "provenance.pep740.json").unlink(missing_ok=True)
                 (lightwell_dir / "provenance.dsse.json").unlink(missing_ok=True)
+        else:
+            (lightwell_dir / "rhtl-index.pep691.json").unlink(missing_ok=True)
+            (lightwell_dir / "provenance.pep740.json").unlink(missing_ok=True)
+            if not sign_key:
+                (lightwell_dir / "provenance.dsse.json").unlink(missing_ok=True)
+        if not sign_key:
+            (lightwell_dir / "metadata.dsse.json").unlink(missing_ok=True)
         metadata_file = lightwell_dir / "metadata.json"
 
         now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -547,8 +611,8 @@ class GitMirrorPublisher:
         bind(final_downloads / original_archive.name, "upstream-acquired-sdist", registry=source_registry)
         bind(normalized_archive, "lightwell-normalized-sdist")
 
-        if source_registry in {"rhtl", "packages.redhat.com"}:
-            advertised = bool(provenance.get("advertised"))
+        if is_rhtl:
+            advertised = is_advertised
             index_file = lightwell_dir / "rhtl-index.pep691.json"
             raw_file = lightwell_dir / "provenance.pep740.json"
             adapted_file = lightwell_dir / "provenance.dsse.json"
@@ -581,7 +645,11 @@ class GitMirrorPublisher:
                         note=(
                             "Signed Lightwell metadata attestation."
                             if sign_key
-                            else "Unsigned SLSA Build Provenance inventory (dry-run; no release fallback)."
+                            else (
+                                "Unsigned SLSA Build Provenance inventory (dry-run; no release fallback)."
+                                if dry_run
+                                else "Unsigned SLSA Build Provenance inventory."
+                            )
                         ),
                         lightwell_builds=LightwellBuildsInfo(
                             repo=repo_name,
@@ -612,15 +680,26 @@ class GitMirrorPublisher:
             # or KMS reference is available. Local private-key files cannot be loaded by
             # cosign verify-blob-attestation --key without their public counterpart.
             verification_key = None
-            if sign_key.startswith(("awskms://", "k8s://", "gcpkms://", "azurekms://", "vault://")):
+            if public_key:
+                verification_key = public_key
+            elif sign_key.startswith(("awskms://", "k8s://", "gcpkms://", "azurekms://", "vault://")):
                 verification_key = sign_key
             else:
                 candidate_pub = Path(sign_key).with_suffix(".pub")
                 if candidate_pub.is_file():
                     verification_key = str(candidate_pub)
+                elif Path("/etc/signing-secret/cosign.pub").is_file():
+                    verification_key = "/etc/signing-secret/cosign.pub"
+                elif Path("/etc/signing-secret/public.pem").is_file():
+                    verification_key = "/etc/signing-secret/public.pem"
             if verification_key:
-                self.verify_blob_attestation(metadata_file, metadata_attestation, verification_key)
-            if source_registry not in {"rhtl", "packages.redhat.com"}:
+                self.verify_blob_attestation(
+                    metadata_file,
+                    metadata_attestation,
+                    verification_key,
+                    "https://slsa.dev/provenance/v1",
+                )
+            if not is_rhtl:
                 self.sign_attestation(
                     metadata=metadata,
                     source_file=source_path,
@@ -630,10 +709,8 @@ class GitMirrorPublisher:
 
         # Git stage and commit initial state
         subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
-        has_staged = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=repo_dir).returncode != 0
-        if has_staged:
-            commit_msg = f"ingest: {canonical} {version} from {source_registry}\n\nsha256: {source_sha256}"
-            subprocess.run(["git", "commit", "-m", commit_msg], cwd=repo_dir, check=True)
+        commit_msg = f"ingest: {canonical} {version} from {source_registry}\n\nsha256: {source_sha256}"
+        subprocess.run(["git", "commit", "-m", commit_msg], cwd=repo_dir, check=True)
 
         # Tag creation
         tag_flag = ["-f"] if allow_overwrite else []
@@ -676,13 +753,12 @@ class GitMirrorPublisher:
         package: str,
         version: str,
         workspace_dir: Path,
-        upstream_pypi_url: Optional[str] = None,
-        upstream_pypi_sha256: Optional[str] = None,
         source_registry: str = "pypi.org",
         allow_overwrite: bool = False,
         sign_key: Optional[str] = None,
         provenance_path: Optional[Path] = None,
         public_key: Optional[str] = None,
+        rhtl_predicate_type: Optional[str] = None,
         dry_run: bool = False,
     ) -> str:
         return self.publish_source(
@@ -690,12 +766,11 @@ class GitMirrorPublisher:
             package=package,
             version=version,
             workspace_dir=workspace_dir,
-            upstream_pypi_url=upstream_pypi_url,
-            upstream_pypi_sha256=upstream_pypi_sha256,
             source_registry=source_registry,
             allow_overwrite=allow_overwrite,
             sign_key=sign_key,
             provenance_path=provenance_path,
             public_key=public_key,
+            rhtl_predicate_type=rhtl_predicate_type,
             dry_run=dry_run,
         )

@@ -25,9 +25,8 @@ The existing `fetch-source` Trusted Artifact has this relative layout:
 downloads/
   <canonical-package>-<version>.tar.gz  # exact upstream-acquired sdist
 source-origin.json                      # Taisce acquisition record
-rhtl-index.pep691.json                  # RHTL only
-provenance.pep740.json                  # exact raw RHTL response bytes
-provenance.dsse.json                    # adapted RHTL DSSE envelope (verified)
+rhtl-index.pep691.json                  # RHTL only; unadvertised provenance only
+provenance.pep740.json                  # RHTL only; advertised provenance only
 ```
 
 `source-origin.json` binds the selected upstream artifact URL, declared and
@@ -36,7 +35,7 @@ one of these evidence states:
 
 - **advertised**: `provenance.pep740.json` is the exact response retrieved from
 the provenance URL advertised by the selected PEP 691 entry. The raw file is
-never parsed and rewritten or decoded; the adapted DSSE is a separate file;
+never parsed and rewritten or decoded; upon publication, its DSSE envelope is adapted into `.lightwell/provenance.dsse.json`;
 - **not advertised**: `rhtl-index.pep691.json` is the exact PEP 691 response
 showing that the selected entry did not advertise provenance;
 - **PyPI**: no RHTL evidence file is present.
@@ -115,9 +114,12 @@ For advertised RHTL evidence, `provenance.dsse.json` is built only from the
 original base64 strings at `attestation_bundles[0].attestations[0].envelope`:
 `statement` becomes `payload` and `signature` becomes `signatures[0].sig`,
 with fixed payload type `application/vnd.in-toto+json`. It is verified with
-Cosign `verify-blob-attestation --insecure-ignore-tlog --type
-https://slsa.dev/provenance/v1` using the provisioned immutable public verification key
-(currently RELEASE3 for the RHTL/Pulp route) against the exact acquired `downloads/` sdist, never the normalized output.
+Cosign `verify-blob-attestation --insecure-ignore-tlog --type <predicateType>`
+using the provisioned immutable public verification key (currently RELEASE3
+for the RHTL/Pulp route) against the exact acquired `downloads/` sdist, never
+the normalized output. The predicate type defaults to SLSA Provenance v1
+(`https://slsa.dev/provenance/v1`) or the predicateType declared in the in-toto
+statement, and can be configured or overridden via `--rhtl-predicate-type`.
 
 `metadata.dsse.json` is signed by Lightwell whenever a signing key (`sign_key`)
 is configured. There is no signed final Git tree hash: adding metadata and
