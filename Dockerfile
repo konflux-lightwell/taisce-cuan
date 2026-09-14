@@ -3,7 +3,7 @@
 FROM quay.io/konflux-ci/task-runner@sha256:4b01fbf98fa7155f5c21443c285f88853864ae7cc66981cf6b543fc6ba16b81b AS cosign
 
 # Stage 1: build the wheel
-FROM registry.access.redhat.com/ubi10/python-312-minimal@sha256:ce5c47b6bc9756685726b5a503729920ba30fe89b82fc7d63b6103a2dd02c734 as builder
+FROM registry.access.redhat.com/ubi10/python-312-minimal@sha256:727bb05559b1b26fce605c036398ef77876b6b732961e6574e32f6cf47a9bcea as builder
 
 USER 0
 WORKDIR /build
@@ -18,7 +18,7 @@ RUN python3.12 -m venv /venv && \
     /venv/bin/pip install . --no-cache-dir
 
 # Stage 2: runtime image with Git and standard toolchain
-FROM registry.access.redhat.com/ubi10/python-312-minimal@sha256:ce5c47b6bc9756685726b5a503729920ba30fe89b82fc7d63b6103a2dd02c734
+FROM registry.access.redhat.com/ubi10/python-312-minimal@sha256:727bb05559b1b26fce605c036398ef77876b6b732961e6574e32f6cf47a9bcea
 
 ARG GIT_COMMIT_SHA=""
 ENV GIT_COMMIT_SHA=${GIT_COMMIT_SHA}
