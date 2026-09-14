@@ -267,6 +267,19 @@ def test_rhtl_pep740_adaptation_preserves_base64_and_rejects_malformed(tmp_path:
     ]}))
     with pytest.raises(ValueError, match="attestation"):
         GitMirrorPublisher.adapt_rhtl_pep740(raw, output)
+    # Rejects malformed nested elements (would raise AttributeError if not handled)
+    raw.write_text(json.dumps({"attestation_bundles": [{"attestations": ["not-a-dict"]}]}))
+    with pytest.raises(ValueError, match="malformed"):
+        GitMirrorPublisher.adapt_rhtl_pep740(raw, output)
+    raw.write_text(json.dumps({"attestation_bundles": [{"attestations": [{"envelope": "not-a-dict"}]}]}))
+    with pytest.raises(ValueError, match="malformed"):
+        GitMirrorPublisher.adapt_rhtl_pep740(raw, output)
+    raw.write_text(json.dumps({"attestation_bundles": ["not-a-dict"]}))
+    with pytest.raises(ValueError, match="malformed"):
+        GitMirrorPublisher.adapt_rhtl_pep740(raw, output)
+    raw.write_text(json.dumps(["not-a-dict"]))
+    with pytest.raises(ValueError, match="malformed"):
+        GitMirrorPublisher.adapt_rhtl_pep740(raw, output)
 
 
 def test_verify_blob_attestation_targets_acquired_and_never_resigns(monkeypatch, tmp_path: Path):
