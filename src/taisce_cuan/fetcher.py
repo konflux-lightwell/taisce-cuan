@@ -86,7 +86,10 @@ class SdistFetcher:
                 self.last_rhtl_reason = "unavailable"
                 return None
             data = response.json()
-            pattern = re.compile(rf"^{re.escape(canonical).replace('-', '[-_.]')}-{re.escape(version)}\.tar\.gz$", re.I)
+            # Escape each hyphen-delimited segment separately so that re.escape() doesn't
+            # turn hyphens into \-, which breaks the [-_.] character class when substituted.
+            name_pat = r"[-_.]".join(re.escape(p) for p in canonical.split("-"))
+            pattern = re.compile(rf"^{name_pat}-{re.escape(version)}\.tar\.gz$", re.I)
             for entry in data.get("files", []):
                 if pattern.match(entry.get("filename", "")):
                     provenance = entry.get("provenance")

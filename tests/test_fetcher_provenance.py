@@ -252,3 +252,29 @@ def test_git_mirror_advertised_rhtl_evidence_digest_validation(tmp_path: Path, m
     (carrier / "rhtl-index.pep691.json").write_bytes(index_bytes)
     publisher.publish_source(source_path=normalized_sdist, package="demo", version="1.0",
                              workspace_dir=tmp_path / "ws", dry_run=True)
+
+
+def test_rhtl_hyphenated_package_name_matches(tmp_path: Path):
+    """Packages with hyphens (e.g. a2a-sdk) must match in the RHTL index."""
+    archive = b"sdist bytes"
+    provenance_url = "https://rhtl.example/prov/a2a-sdk-1.1.0.json"
+    index_url = "https://rhtl.example/simple/a2a-sdk/"
+    archive_url = "https://rhtl.example/files/a2a-sdk-1.1.0.tar.gz"
+    index = {"files": [{"filename": "a2a-sdk-1.1.0.tar.gz", "url": archive_url,
+                         "hashes": {"sha256": hashlib.sha256(archive).hexdigest()},
+                         "size": len(archive), "provenance": provenance_url}]}
+
+    def handler(request):
+        if str(request.url) == index_url:
+            return httpx.Response(200, content=json.dumps(index).encode(),
+                                  headers={"content-type": "application/json"}, request=request)
+        if str(request.url) == archive_url:
+            return httpx.Response(200, content=archive, request=request)
+        if str(request.url) == provenance_url:
+            return httpx.Response(200, content=b"{}", request=request)
+        return httpx.Response(404, request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    fetcher = SdistFetcher("https://rhtl.example/simple", "https://pypi.example/pypi", client=client)
+    _, selected, _ = fetcher.fetch("a2a-sdk", "1.1.0", tmp_path, registries="rhtl")
+    assert selected.registry == "rhtl"
