@@ -139,7 +139,9 @@ def make_carrier(
 def test_normalize_source_route():
     assert normalize_source_route("rhtl") == SourceRoute.RHTL
     assert normalize_source_route("packages.redhat.com") == SourceRoute.RHTL
+    assert normalize_source_route("pypi") == SourceRoute.PYPI
     assert normalize_source_route("pypi.org") == SourceRoute.PYPI
+    assert normalize_source_route("pypi.python.org") == SourceRoute.PYPI
 
     with pytest.raises(ProvenanceVerificationError, match="Unsupported source registry"):
         normalize_source_route("unsupported-forge.org")
@@ -261,6 +263,91 @@ def test_verify_fails_on_transformation_input_mismatch(tmp_path: Path):
 
     with pytest.raises(ProvenanceVerificationError, match="sdist transformation input does not match"):
         verify_normalized_source_artifact(norm_sdist, package="transform-mismatch", version="1.0.0")
+
+
+def test_verify_fails_on_route_mode_conflict(tmp_path: Path):
+    # Registry is rhtl, but mode is set to pypi -> fail closed
+    norm_sdist, carrier = make_carrier(
+        tmp_path, "conflicting-route", "1.0.0", registry="rhtl", mode="pypi"
+    )
+
+    with pytest.raises(ProvenanceVerificationError, match="Conflicting provenance mode"):
+        verify_normalized_source_artifact(norm_sdist, package="conflicting-route", version="1.0.0")
+
+
+def test_verify_fails_on_origin_package_or_version_mismatch(tmp_path: Path):
+    norm_sdist, carrier = make_carrier(tmp_path, "mismatch-meta", "1.0.0")
+
+    # Mismatched requested package
+    with pytest.raises(ProvenanceVerificationError, match="source-origin acquired package"):
+        verify_normalized_source_artifact(norm_sdist, package="different-pkg", version="1.0.0")
+
+    # Mismatched requested version
+    with pytest.raises(ProvenanceVerificationError, match="source-origin acquired version"):
+        verify_normalized_source_artifact(norm_sdist, package="mismatch-meta", version="2.0.0")
+
+
+def test_verify_rejects_traversal_in_acquired_path(tmp_path: Path):
+    # A source-origin acquired.path pointing outside the carrier must be rejected
+    # before any archive is read.
+    norm_sdist, carrier = make_carrier(tmp_path, "traversal", "1.0.0")
+    origin_file = carrier / "source-origin.json"
+    origin = json.loads(origin_file.read_text())
+    origin["acquired"]["path"] = "../evil-1.0.0.tar.gz"
+    origin_file.write_text(json.dumps(origin))
+
+    with pytest.raises(ArtifactError, match="Dangerous path traversal"):
+        verify_normalized_source_artifact(norm_sdist, package="traversal", version="1.0.0")
+
+
+def test_verify_fails_on_missing_registry(tmp_path: Path):
+    # Without an explicit acquired.registry, no route can be resolved (no implicit
+    # PyPI default) -> fail closed.
+    norm_sdist, carrier = make_carrier(tmp_path, "no-registry", "1.0.0")
+    origin_file = carrier / "source-origin.json"
+    origin = json.loads(origin_file.read_text())
+    del origin["acquired"]["registry"]
+    origin_file.write_text(json.dumps(origin))
+
+    with pytest.raises(ProvenanceVerificationError, match="Unsupported source registry"):
+        verify_normalized_source_artifact(norm_sdist, package="no-registry", version="1.0.0")
+
+
+def test_verify_fails_on_non_dict_sections(tmp_path: Path):
+    # source-origin.json must be a JSON object with dict acquired/provenance sections.
+    norm_sdist, carrier = make_carrier(tmp_path, "non-dict", "1.0.0")
+    origin_file = carrier / "source-origin.json"
+    transform_file = carrier / "sdist-transformation.json"
+
+    # Whole document is not an object
+    origin_file.write_text("[]")
+    with pytest.raises(ProvenanceVerificationError, match="must be a JSON object"):
+        verify_normalized_source_artifact(norm_sdist, package="non-dict", version="1.0.0")
+
+    # acquired section is not a dict
+    _, carrier = make_carrier(tmp_path, "non-dict-acq", "1.0.0")
+    norm_sdist = carrier / "non-dict-acq-1.0.0.tar.gz"
+    origin_file = carrier / "source-origin.json"
+    origin = json.loads(origin_file.read_text())
+    origin["acquired"] = "not-a-dict"
+    origin_file.write_text(json.dumps(origin))
+    with pytest.raises(ProvenanceVerificationError, match="lacks acquired section"):
+        verify_normalized_source_artifact(norm_sdist, package="non-dict-acq", version="1.0.0")
+
+    # provenance section is not a dict (re-anchor the transformation digest so the
+    # tampered origin passes the earlier digest gate and reaches the check).
+    _, carrier = make_carrier(tmp_path, "non-dict-prov", "1.0.0")
+    norm_sdist = carrier / "non-dict-prov-1.0.0.tar.gz"
+    origin_file = carrier / "source-origin.json"
+    transform_file = carrier / "sdist-transformation.json"
+    origin = json.loads(origin_file.read_text())
+    origin["provenance"] = "not-a-dict"
+    origin_file.write_text(json.dumps(origin))
+    tf = json.loads(transform_file.read_text())
+    tf["source_origin_sha256"] = compute_sha256(origin_file)
+    transform_file.write_text(json.dumps(tf))
+    with pytest.raises(ProvenanceVerificationError, match="lacks provenance section"):
+        verify_normalized_source_artifact(norm_sdist, package="non-dict-prov", version="1.0.0")
 
 
 def test_copy_verified_evidence(tmp_path: Path):

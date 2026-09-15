@@ -89,7 +89,10 @@ def load_json_object(path: Path, label: str) -> dict[str, Any]:
     """Load one metadata record as a JSON object with a path-specific error."""
     try:
         content = path.read_text(encoding="utf-8")
-        return json.loads(content)
+        data = json.loads(content)
+        if not isinstance(data, dict):
+            raise ProvenanceVerificationError(f"{label} ({path.name}) must be a JSON object")
+        return data
     except (OSError, json.JSONDecodeError) as exc:
         raise ProvenanceVerificationError(f"source provenance carrier contains invalid JSON in {label}: {exc}") from exc
 
@@ -134,12 +137,12 @@ def normalize_source_route(registry: str) -> SourceRoute:
     """
     Normalize registry string into SourceRoute enum.
     rhtl and packages.redhat.com normalize to SourceRoute.RHTL.
-    pypi.org normalizes to SourceRoute.PYPI.
+    pypi, pypi.org, pypi.python.org normalize to SourceRoute.PYPI.
     """
     reg_clean = (registry or "").strip().lower()
     if reg_clean in {"rhtl", "packages.redhat.com"}:
         return SourceRoute.RHTL
-    if reg_clean == "pypi.org":
+    if reg_clean in {"pypi", "pypi.org", "pypi.python.org"}:
         return SourceRoute.PYPI
     raise ProvenanceVerificationError(f"Unsupported source registry '{registry}'")
 
@@ -235,17 +238,34 @@ def verify_acquired_source(
     Returns (AcquiredSourceArtifact, registry, acquired_sha256).
     """
     canonical = canonicalize_name(expected_package)
-    acquired = origin.get("acquired", {})
+    acquired = origin.get("acquired")
+    if not isinstance(acquired, dict):
+        raise ProvenanceVerificationError("source-origin.json lacks acquired section")
 
     acquired_digest = acquired.get("sha256")
     acquired_path_str = acquired.get("path") or acquired.get("filename")
-    registry = acquired.get("registry", "pypi.org")
+    registry = acquired.get("registry", "")
+    pkg_in_origin = acquired.get("package")
+    ver_in_origin = acquired.get("version")
+
+    if pkg_in_origin and canonicalize_name(pkg_in_origin) != canonical:
+        raise ProvenanceVerificationError(
+            f"source-origin acquired package '{pkg_in_origin}' does not match expected '{expected_package}'"
+        )
+    if ver_in_origin and ver_in_origin != expected_version:
+        raise ProvenanceVerificationError(
+            f"source-origin acquired version '{ver_in_origin}' does not match expected '{expected_version}'"
+        )
 
     if not isinstance(acquired_digest, str) or not acquired_digest:
         raise ProvenanceVerificationError("source-origin.json lacks acquired digest")
 
     default_archive_name = f"{canonical}-{expected_version}.tar.gz"
-    archive_path = carrier_root / (acquired_path_str or f"downloads/{default_archive_name}")
+    archive_path = verify_relative_artifact_path(
+        carrier_root,
+        acquired_path_str or f"downloads/{default_archive_name}",
+        "acquired archive",
+    )
 
     if archive_path.parent != carrier_root / "downloads" or not archive_path.is_file():
         raise ProvenanceVerificationError("source provenance carrier is missing downloads/original sdist")
@@ -330,11 +350,23 @@ def verify_upstream_evidence(
     Returns (route, tuple_of_evidence_files_to_publish).
     Never parses PEP 740 contents.
     """
-    provenance = origin.get("provenance", {})
+    provenance = origin.get("provenance")
+    if not isinstance(provenance, dict):
+        raise ProvenanceVerificationError("source-origin.json lacks provenance section")
 
     provenance_mode = provenance.get("mode")
     if provenance_mode not in {"pypi", "rhtl", "pypi-slsa-v1", "rhtl-pep740"}:
         raise ProvenanceVerificationError("source-origin provenance mode is missing or unsupported")
+
+    # Mode and route must match: fail-closed on conflict
+    if route == SourceRoute.RHTL and provenance_mode in {"pypi", "pypi-slsa-v1"}:
+        raise ProvenanceVerificationError(
+            f"Conflicting provenance mode '{provenance_mode}' for RHTL source route"
+        )
+    if route == SourceRoute.PYPI and provenance_mode in {"rhtl", "rhtl-pep740"}:
+        raise ProvenanceVerificationError(
+            f"Conflicting provenance mode '{provenance_mode}' for PyPI source route"
+        )
 
     evidence_files: list[Path] = [
         carrier_root / "source-origin.json",
