@@ -17,6 +17,7 @@ limitations under the License.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import tempfile
@@ -94,7 +95,11 @@ class SdistSourceFetcher:
                 self.last_rhtl_reason = "unavailable"
                 return None
             data = response.json()
-            pattern = re.compile(rf"^{re.escape(canonical).replace('-', '[-_.]')}-{re.escape(version)}\.tar\.gz$", re.I)
+            escaped_pkg = re.escape(canonical).replace(re.escape("-"), "[-_.]")
+            pattern = re.compile(
+                rf"^{escaped_pkg}-{re.escape(version)}\.tar\.gz$",
+                re.I,
+            )
             for entry in data.get("files", []):
                 if pattern.match(entry.get("filename", "")):
                     provenance = entry.get("provenance")
@@ -217,6 +222,14 @@ class SdistSourceFetcher:
             if urlparse(str(response.url)).scheme.lower() != "https":
                 raise ValueError("provenance request redirected away from TLS")
             body = response.content
+            if not body or not body.strip():
+                raise ValueError("advertised RHTL provenance response is empty")
+            try:
+                parsed = json.loads(body.decode("utf-8"))
+                if not isinstance(parsed, dict):
+                    raise ValueError("advertised RHTL provenance is not a JSON object")
+            except Exception as exc:
+                raise ValueError(f"advertised RHTL provenance is malformed JSON: {exc}") from exc
             if len(body) > self.max_download_bytes:
                 raise ValueError("provenance exceeds configured size bound")
             raw_advertised = body

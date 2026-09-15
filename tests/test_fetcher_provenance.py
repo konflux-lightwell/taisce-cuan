@@ -252,3 +252,93 @@ def test_git_mirror_advertised_rhtl_evidence_digest_validation(tmp_path: Path, m
     (carrier / "rhtl-index.pep691.json").write_bytes(index_bytes)
     publisher.publish_source(source_path=normalized_sdist, package="demo", version="1.0",
                              workspace_dir=tmp_path / "ws", dry_run=True)
+
+
+def test_rhtl_index_filename_matches_normalized_separators(tmp_path: Path):
+    # RHTL indexes may publish the sdist with underscore separators even when the
+    # requested (canonical) name uses hyphens. The filename matcher must treat
+    # '-', '_' and '.' as equivalent separators so the archive still resolves.
+    archive = b"raw sdist bytes"
+    index_url = "https://rhtl.example/simple/my-cool-pkg/"
+    archive_url = "https://rhtl.example/files/my_cool_pkg-1.0.tar.gz"
+    index = {"files": [{"filename": "my_cool_pkg-1.0.tar.gz", "url": archive_url,
+                        "hashes": {"sha256": hashlib.sha256(archive).hexdigest()},
+                        "size": len(archive)}]}
+    index_body = json.dumps(index).encode()
+
+    def handler(request):
+        if str(request.url) == index_url:
+            return httpx.Response(200, content=index_body, headers={"content-type": "application/json"}, request=request)
+        if str(request.url) == archive_url:
+            return httpx.Response(200, content=archive, request=request)
+        return httpx.Response(404, request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    fetcher = SdistSourceFetcher("https://rhtl.example/simple", "https://pypi.example/pypi", client=client)
+    fetcher.fetch("my-cool-pkg", "1.0", tmp_path, registries="rhtl")
+
+    # Archive resolved and stored under the canonical download name.
+    assert (tmp_path / "downloads/my-cool-pkg-1.0.tar.gz").read_bytes() == archive
+    origin = json.loads((tmp_path / "source-origin.json").read_text())
+    assert origin["acquired"]["registry"] == "rhtl"
+
+
+def test_rhtl_advertised_provenance_empty_body_fails_closed(tmp_path: Path):
+    archive = b"raw sdist bytes"
+    index_url = "https://rhtl.example/simple/demo/"
+    archive_url = "https://rhtl.example/files/demo.tar.gz"
+    provenance_url = "https://rhtl.example/files/provenance.json"
+    index = {"files": [{"filename": "demo-1.0.tar.gz", "url": archive_url,
+                        "hashes": {"sha256": hashlib.sha256(archive).hexdigest()},
+                        "size": len(archive), "provenance": provenance_url}]}
+    index_body = json.dumps(index).encode()
+
+    def handler(request):
+        if str(request.url) == index_url:
+            return httpx.Response(200, content=index_body, headers={"content-type": "application/json"}, request=request)
+        if str(request.url) == archive_url:
+            return httpx.Response(200, content=archive, request=request)
+        if str(request.url) == provenance_url:
+            return httpx.Response(200, content=b"   ", request=request)
+        return httpx.Response(404, request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    fetcher = SdistSourceFetcher("https://rhtl.example/simple", "https://pypi.example/pypi", client=client)
+    with pytest.raises(ValueError, match="advertised RHTL provenance response is empty"):
+        fetcher.fetch("demo", "1.0", tmp_path, registries="rhtl")
+    assert not (tmp_path / "source-origin.json").exists()
+    assert not (tmp_path / "provenance.pep740.json").exists()
+
+
+@pytest.mark.parametrize(
+    "prov_body, expected",
+    [
+        (b"this is not json", "malformed JSON"),
+        (b"[1, 2, 3]", "not a JSON object"),
+    ],
+)
+def test_rhtl_advertised_provenance_malformed_body_fails_closed(tmp_path: Path, prov_body, expected):
+    archive = b"raw sdist bytes"
+    index_url = "https://rhtl.example/simple/demo/"
+    archive_url = "https://rhtl.example/files/demo.tar.gz"
+    provenance_url = "https://rhtl.example/files/provenance.json"
+    index = {"files": [{"filename": "demo-1.0.tar.gz", "url": archive_url,
+                        "hashes": {"sha256": hashlib.sha256(archive).hexdigest()},
+                        "size": len(archive), "provenance": provenance_url}]}
+    index_body = json.dumps(index).encode()
+
+    def handler(request):
+        if str(request.url) == index_url:
+            return httpx.Response(200, content=index_body, headers={"content-type": "application/json"}, request=request)
+        if str(request.url) == archive_url:
+            return httpx.Response(200, content=archive, request=request)
+        if str(request.url) == provenance_url:
+            return httpx.Response(200, content=prov_body, request=request)
+        return httpx.Response(404, request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    fetcher = SdistSourceFetcher("https://rhtl.example/simple", "https://pypi.example/pypi", client=client)
+    with pytest.raises(ValueError, match=expected):
+        fetcher.fetch("demo", "1.0", tmp_path, registries="rhtl")
+    assert not (tmp_path / "source-origin.json").exists()
+    assert not (tmp_path / "provenance.pep740.json").exists()
