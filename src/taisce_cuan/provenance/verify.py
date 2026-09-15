@@ -200,13 +200,19 @@ def extract_pep740_predicate_type(raw_path: Path) -> Optional[str]:
     return None
 
 
-def verify_blob_attestation(
+def _run_cosign_verify(
     source_file: Path,
-    signature_file: Path,
+    attestation_file: Path,
     public_key: str,
-    predicate_type: str = "https://slsa.dev/provenance/v1",
+    predicate_type: str,
+    sig_flag: str,
 ) -> None:
-    """Verify a Cosign DSSE blob, failing closed before any publication."""
+    """Run cosign verify-blob-attestation, failing closed before any publication.
+
+    ``sig_flag`` already encodes the attestation path as ``--signature=<path>``
+    (bare DSSE envelope) or ``--bundle=<path>`` (sigstore bundle), so it is the
+    only reference to ``attestation_file`` passed to cosign.
+    """
     key = (public_key or "").strip()
     if not key:
         raise ValueError("public verification key is required for attestation verification")
@@ -218,10 +224,39 @@ def verify_blob_attestation(
     result = subprocess.run([
         cosign_bin, "verify-blob-attestation", "--insecure-ignore-tlog",
         "--type", predicate_type, "--key", key,
-        "--signature", str(signature_file), str(source_file),
+        sig_flag, str(source_file),
     ], capture_output=True, text=True, check=False)
     if result.returncode != 0:
-        raise RuntimeError(f"cosign verify-blob-attestation failed (exit {result.returncode}): {result.stderr}")
+        raise RuntimeError(
+            f"cosign verify-blob-attestation failed (exit {result.returncode}): {result.stderr}"
+            f"\n--- stdout ---\n{result.stdout}"
+        )
+
+
+def verify_blob_attestation(
+    source_file: Path,
+    signature_file: Path,
+    public_key: str,
+    predicate_type: str = "https://slsa.dev/provenance/v1",
+) -> None:
+    """Verify a bare DSSE envelope produced by adapt_rhtl_pep740 (RHTL path)."""
+    _run_cosign_verify(
+        source_file, signature_file, public_key, predicate_type,
+        f"--signature={signature_file}",
+    )
+
+
+def verify_bundle_attestation(
+    source_file: Path,
+    bundle_file: Path,
+    public_key: str,
+    predicate_type: str = "https://slsa.dev/provenance/v1",
+) -> None:
+    """Verify a sigstore bundle produced by cosign attest-blob --bundle (self-verify)."""
+    _run_cosign_verify(
+        source_file, bundle_file, public_key, predicate_type,
+        f"--bundle={bundle_file}",
+    )
 
 
 def verify_acquired_source(

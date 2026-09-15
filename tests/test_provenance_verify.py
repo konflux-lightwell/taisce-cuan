@@ -389,7 +389,7 @@ def test_verify_blob_attestation_targets_acquired_and_never_resigns(monkeypatch,
 
     # Fails closed if cosign returns non-zero exit code
     monkeypatch.setattr("taisce_cuan.provenance.verify.shutil.which", lambda _: "/bin/cosign")
-    monkeypatch.setattr("taisce_cuan.provenance.verify.subprocess.run", lambda *args, **kwargs: SimpleNamespace(returncode=1, stderr="signature verification failed"))
+    monkeypatch.setattr("taisce_cuan.provenance.verify.subprocess.run", lambda *args, **kwargs: SimpleNamespace(returncode=1, stderr="signature verification failed", stdout=""))
     with pytest.raises(RuntimeError, match="cosign verify-blob-attestation failed"):
         verify_blob_attestation(source, signature, str(key))
 

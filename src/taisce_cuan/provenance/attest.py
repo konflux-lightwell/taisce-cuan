@@ -43,7 +43,7 @@ from taisce_cuan.provenance.verify import (
     ProvenanceVerificationError,
     SourceRoute,
     VerifiedSourceArtifact,
-    verify_blob_attestation,
+    verify_bundle_attestation,
 )
 from taisce_cuan.sdist import canonicalize_name, compute_sha256
 
@@ -234,7 +234,7 @@ class CosignAttestationSigner:
                 "--type=https://slsa.dev/provenance/v1",
                 f"--key={key_str}",
                 "--yes",
-                f"--output-file={output_provenance_file}",
+                f"--bundle={output_provenance_file}",
             ]
             res = subprocess.run(cmd, capture_output=True, text=True, check=False)
 
@@ -315,7 +315,7 @@ def attest_source_mirror(
                 verification_key = "/etc/signing-secret/public.pem"
 
         if verification_key:
-            verify_blob_attestation(
+            verify_bundle_attestation(
                 metadata_file,
                 metadata_attestation,
                 verification_key,
