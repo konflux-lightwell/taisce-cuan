@@ -284,7 +284,7 @@ class GitMirrorPublisher:
         result = subprocess.run([
             cosign_bin, "verify-blob-attestation", "--insecure-ignore-tlog",
             "--type", predicate_type, "--key", key,
-            sig_flag, str(attestation_file), str(source_file),
+            sig_flag, str(source_file),
         ], capture_output=True, text=True, check=False)
         if result.returncode != 0:
             raise RuntimeError(
