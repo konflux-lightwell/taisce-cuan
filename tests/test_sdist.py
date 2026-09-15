@@ -11,8 +11,8 @@ def test_canonicalize_name():
 
 
 def test_fetcher_registries_parsing(tmp_path: Path):
-    from taisce_cuan.fetcher import SdistFetcher
-    fetcher = SdistFetcher()
+    from taisce_cuan.source import SdistSourceFetcher
+    fetcher = SdistSourceFetcher()
     try:
         fetcher.fetch("non-existent-pkg-xyz", "0.0.1", tmp_path, registries="rhtl,pypi.org")
         assert False, "Should have raised RuntimeError"
@@ -21,8 +21,8 @@ def test_fetcher_registries_parsing(tmp_path: Path):
 
 
 def test_fetcher_unrecognized_registry_raises(tmp_path: Path):
-    from taisce_cuan.fetcher import SdistFetcher
-    fetcher = SdistFetcher()
+    from taisce_cuan.source import SdistSourceFetcher
+    fetcher = SdistSourceFetcher()
     with pytest.raises(ValueError, match="Unrecognized registry 'unknown-registry'"):
         fetcher.fetch("requests", "2.31.0", tmp_path, registries="unknown-registry")
 
@@ -93,8 +93,8 @@ def test_extract_zip_sdist_and_zip_slip_prevention(tmp_path: Path):
 
 
 def test_fetcher_missing_sha256_fail_closed(tmp_path: Path):
-    from taisce_cuan.fetcher import SdistFetcher, SdistSourceInfo
-    fetcher = SdistFetcher()
+    from taisce_cuan.source import SdistSourceFetcher, SdistSourceInfo
+    fetcher = SdistSourceFetcher()
     # Mock query_rhtl returning entry with empty sha256
     fetcher.query_rhtl = lambda pkg, ver: SdistSourceInfo(
         registry="rhtl",
@@ -145,5 +145,3 @@ def test_inspect_sdist_metadata_fallback_filename(tmp_path: Path):
     pkg, ver = inspect_sdist_metadata(sdist_file)
     assert pkg == "fallback_pkg"
     assert ver == "0.10.2b1"
-
-
