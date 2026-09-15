@@ -350,6 +350,15 @@ def test_verify_fails_on_non_dict_sections(tmp_path: Path):
         verify_normalized_source_artifact(norm_sdist, package="non-dict-prov", version="1.0.0")
 
 
+def test_verify_fails_on_pypi_with_extraneous_pep740(tmp_path: Path):
+    norm_sdist, carrier = make_carrier(tmp_path, "extraneous-pep740", "1.0.0", registry="pypi.org", mode="pypi")
+    # Add extraneous pep740 to PyPI carrier
+    (carrier / "provenance.pep740.json").write_text('{"statement":"bad"}')
+
+    with pytest.raises(ProvenanceVerificationError, match="PyPI source carrier must not contain RHTL provenance.pep740.json"):
+        verify_normalized_source_artifact(norm_sdist, package="extraneous-pep740", version="1.0.0")
+
+
 def test_copy_verified_evidence(tmp_path: Path):
     norm_sdist, carrier = make_carrier(tmp_path, "copy-ev", "1.0.0")
     verified = verify_normalized_source_artifact(norm_sdist, package="copy-ev", version="1.0.0")

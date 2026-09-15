@@ -373,6 +373,12 @@ def verify_upstream_evidence(
         carrier_root / "sdist-transformation.json",
     ]
 
+    if route == SourceRoute.PYPI:
+        if (carrier_root / "provenance.pep740.json").exists():
+            raise ProvenanceVerificationError(
+                "PyPI source carrier must not contain RHTL provenance.pep740.json"
+            )
+
     if route == SourceRoute.RHTL:
         status = provenance.get("status")
         is_advertised = provenance.get("advertised")
