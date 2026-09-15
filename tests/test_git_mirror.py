@@ -579,6 +579,215 @@ def test_provenance_carrier_is_published_with_normalized_sdist(tmp_path: Path):
     assert not (repo_dir / ".lightwell" / "provenance.json").exists()
 
 
+def create_rhtl_sample_source(
+    path: Path,
+    pkg_name: str,
+    version: str,
+    advertised: bool = True,
+    extra_content: str = "",
+) -> Path:
+    """Create a normalized sdist with an RHTL provenance carrier."""
+    import hashlib
+
+    fn = f"{pkg_name}-{version}.tar.gz"
+    carrier_root = path / f"carrier_rhtl_{pkg_name}_{version}_{advertised}_{extra_content or 'default'}"
+    carrier_root.mkdir(parents=True, exist_ok=True)
+    source_file = carrier_root / fn
+    pkg_dir = carrier_root / f"src_{fn}"
+    pkg_dir.mkdir(parents=True, exist_ok=True)
+    (pkg_dir / "pyproject.toml").write_text(f"[project]\nname='{pkg_name}'\nversion='{version}'\n# {extra_content}")
+    with tarfile.open(source_file, "w:gz") as tar:
+        tar.add(pkg_dir, arcname=f"{pkg_name}-{version}")
+
+    source_sha256 = hashlib.sha256(source_file.read_bytes()).hexdigest()
+    downloads = carrier_root / "downloads"
+    downloads.mkdir()
+    original = downloads / fn
+    original.write_bytes(source_file.read_bytes())
+    original_sha256 = hashlib.sha256(original.read_bytes()).hexdigest()
+
+    pep691_content = b'{"files":[{"filename":"' + fn.encode() + b'","hashes":{"sha256":"' + original_sha256.encode() + b'"}}]}'
+    pep691_file = carrier_root / "rhtl-index.pep691.json"
+    pep691_file.write_bytes(pep691_content)
+    pep691_sha256 = hashlib.sha256(pep691_content).hexdigest()
+
+    pep740_sha256 = None
+    if advertised:
+        pep740_dict = {
+            "attestation_bundles": [
+                {
+                    "attestations": [
+                        {
+                            "envelope": {
+                                "statement": "cGF5bG9hZA==",
+                                "signature": "c2ln",
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+        pep740_content = json.dumps(pep740_dict).encode("utf-8")
+        pep740_file = carrier_root / "provenance.pep740.json"
+        pep740_file.write_bytes(pep740_content)
+        pep740_sha256 = hashlib.sha256(pep740_content).hexdigest()
+
+    origin_data = {
+        "schema": "https://lightwell.dev/schemas/source-origin/v1",
+        "acquired": {
+            "registry": "rhtl",
+            "package": pkg_name,
+            "version": version,
+            "path": f"downloads/{fn}",
+            "sha256": original_sha256,
+        },
+        "provenance": {
+            "mode": "rhtl",
+            "advertised": advertised,
+            "status": "advertised" if advertised else "not-advertised",
+            "sha256": pep740_sha256,
+            "rhtl": {
+                "status": "advertised" if advertised else "not-advertised",
+                "evidence": {
+                    "sha256": pep691_sha256,
+                },
+            },
+        },
+    }
+    origin_file = carrier_root / "source-origin.json"
+    origin_file.write_text(json.dumps(origin_data, sort_keys=True) + "\n")
+
+    (carrier_root / "sdist-transformation.json").write_text(json.dumps({
+        "schema": "https://lightwell.dev/schemas/sdist-transformation/v1",
+        "input": {"sha256": original_sha256},
+        "output": {"sha256": source_sha256, "path": fn},
+        "source_origin_sha256": hashlib.sha256(origin_file.read_bytes()).hexdigest(),
+        "transformation": "normalized-sdist",
+    }, sort_keys=True) + "\n")
+    return source_file
+
+
+def test_rhtl_advertised_exact_evidence_and_no_native_dsse(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(GitMirrorPublisher, "verify_blob_attestation", staticmethod(lambda *args: None))
+    source_file = create_rhtl_sample_source(tmp_path, "rhtl-advertised", "1.0.0", advertised=True)
+    carrier_root = source_file.parent
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com",
+        group="testgroup",
+        committer_name="bot",
+        committer_email="bot@example.com",
+    )
+
+    tag = publisher.publish_source(
+        source_path=source_file,
+        package="rhtl-advertised",
+        version="1.0.0",
+        workspace_dir=workspace,
+        dry_run=True,
+    )
+    assert tag == "rhtl-advertised/1.0.0"
+
+    repo_dir = workspace / "pypi.org-rhtl-advertised"
+    lightwell_dir = repo_dir / ".lightwell"
+
+    # Raw PEP 740 is preserved and adapted DSSE is created
+    assert (lightwell_dir / "provenance.pep740.json").read_bytes() == (carrier_root / "provenance.pep740.json").read_bytes()
+    assert (lightwell_dir / "provenance.dsse.json").exists()
+
+    # RHTL route never emits provenance.dsse
+    assert not (lightwell_dir / "provenance.dsse").exists()
+    assert not (lightwell_dir / "provenance.json").exists()
+    assert not (lightwell_dir / "rhtl-index.pep691.json").exists()
+
+
+def test_rhtl_not_advertised_exact_evidence_and_no_pep740(tmp_path: Path):
+    source_file = create_rhtl_sample_source(tmp_path, "rhtl-unadvertised", "1.0.0", advertised=False)
+    carrier_root = source_file.parent
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com",
+        group="testgroup",
+        committer_name="bot",
+        committer_email="bot@example.com",
+    )
+
+    tag = publisher.publish_source(
+        source_path=source_file,
+        package="rhtl-unadvertised",
+        version="1.0.0",
+        workspace_dir=workspace,
+        dry_run=True,
+    )
+    assert tag == "rhtl-unadvertised/1.0.0"
+
+    repo_dir = workspace / "pypi.org-rhtl-unadvertised"
+    lightwell_dir = repo_dir / ".lightwell"
+
+    # PEP 691 index evidence is preserved byte-for-byte
+    assert (lightwell_dir / "rhtl-index.pep691.json").read_bytes() == (carrier_root / "rhtl-index.pep691.json").read_bytes()
+    # PEP 740 provenance was not advertised, so it must not exist
+    assert not (lightwell_dir / "provenance.pep740.json").exists()
+    # RHTL never emits provenance.dsse
+    assert not (lightwell_dir / "provenance.dsse").exists()
+    assert not (lightwell_dir / "provenance.dsse.json").exists()
+
+
+@pytest.mark.skipif(not shutil.which("cosign"), reason="cosign CLI binary is not installed")
+def test_cosign_signing_pypi_vs_rhtl(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(GitMirrorPublisher, "verify_blob_attestation", staticmethod(lambda *args: None))
+    # Generate disposable cosign test key
+    key_file = tmp_path / "cosign.key"
+    pub_file = tmp_path / "cosign.pub"
+    env = {**subprocess.os.environ, "COSIGN_PASSWORD": ""}
+    subprocess.run(
+        ["cosign", "generate-key-pair", f"--output-key-prefix={tmp_path / 'cosign'}"],
+        env=env,
+        check=True,
+        capture_output=True,
+    )
+    assert key_file.exists()
+
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com",
+        group="testgroup",
+        committer_name="bot",
+        committer_email="bot@example.com",
+    )
+
+    # 1. PyPI route without signing: no dsse files
+    pypi_source = create_sample_source(tmp_path, "sign-pypi", "1.0.0")
+    publisher.publish_source(
+        source_path=pypi_source,
+        package="sign-pypi",
+        version="1.0.0",
+        workspace_dir=workspace,
+        dry_run=True,
+    )
+    pypi_lightwell = workspace / "pypi.org-sign-pypi" / ".lightwell"
+    assert not (pypi_lightwell / "metadata.dsse").exists()
+    assert not (pypi_lightwell / "metadata.dsse.json").exists()
+    assert not (pypi_lightwell / "provenance.dsse").exists()
+    assert not (pypi_lightwell / "provenance.dsse.json").exists()
+
+    # 2. RHTL route without signing: no dsse files, opaque PEP 740 preserved and adapted
+    rhtl_source = create_rhtl_sample_source(tmp_path, "sign-rhtl", "1.0.0", advertised=True)
+    publisher.publish_source(
+        source_path=rhtl_source,
+        package="sign-rhtl",
+        version="1.0.0",
+        workspace_dir=workspace,
+        dry_run=True,
+    )
+    rhtl_lightwell = workspace / "pypi.org-sign-rhtl" / ".lightwell"
+    assert not (rhtl_lightwell / "metadata.dsse").exists()
+    assert not (rhtl_lightwell / "metadata.dsse.json").exists()
+    assert not (rhtl_lightwell / "provenance.dsse").exists()
+    assert (rhtl_lightwell / "provenance.dsse.json").exists()
+    assert (rhtl_lightwell / "provenance.pep740.json").exists()
+
+
 def test_publish_source_signing_and_legacy_unlinking_mocked(tmp_path: Path, monkeypatch):
     source_file = create_sample_source(tmp_path, "signed-pkg", "1.0.0")
     workspace = tmp_path / "workspace"
@@ -793,3 +1002,22 @@ def test_cli_push_auto_discover_metadata(tmp_path: Path):
     assert metadata_file.exists()
     assert '"package": "auto-disc-pkg"' in metadata_file.read_text()
     assert '"version": "3.2.1"' in metadata_file.read_text()
+
+
+def test_cli_clean_process_invocation():
+    """Verify CLI entrypoint runs cleanly in an isolated Python process without circular imports."""
+    import os
+    import subprocess
+    import sys
+
+    src_dir = str(Path(__file__).resolve().parent.parent / "src")
+    env = {**os.environ, "PYTHONPATH": src_dir}
+
+    result = subprocess.run(
+        [sys.executable, "-m", "taisce_cuan.cli", "--help"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 0
+    assert "Lightwell Python source distribution ingestion" in result.stdout
