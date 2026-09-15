@@ -22,8 +22,7 @@ import os
 import sys
 from pathlib import Path
 
-from taisce_cuan.source.fetch import SdistSourceFetcher
-from taisce_cuan.git_mirror import GitMirrorPublisher
+from taisce_cuan.source import GitMirrorPublisher, SdistSourceFetcher
 from taisce_cuan.sdist import inspect_sdist_metadata
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
