@@ -6,8 +6,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from taisce_cuan.source import SdistSourceFetcher
-from taisce_cuan.git_mirror import GitMirrorPublisher
+from taisce_cuan.source import GitMirrorPublisher, SdistSourceFetcher
 
 
 def test_rhtl_advertised_origin_binds_raw_provenance(tmp_path: Path):
