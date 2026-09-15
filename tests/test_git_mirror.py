@@ -125,6 +125,54 @@ def test_idempotent_push_same_content(tmp_path: Path):
     assert tag2 == "pkg-test/1.0.0"
 
 
+def test_overwrite_republish_identical_content_skips_empty_commit(tmp_path: Path, monkeypatch):
+    """Re-publishing byte-identical content with allow_overwrite=True must not fail on an empty commit.
+
+    With a frozen metadata timestamp the second publish produces a tree identical to the
+    prior commit, so `git add -A` stages nothing. Without the empty-commit guard the
+    subsequent `git commit` would abort with "nothing to commit"; the guard skips it.
+    """
+    import datetime as _dt
+
+    fixed = _dt.datetime(2026, 1, 1, tzinfo=_dt.timezone.utc)
+
+    class FrozenDateTime(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed
+
+    monkeypatch.setattr("taisce_cuan.provenance.attest.datetime.datetime", FrozenDateTime)
+
+    source_file = create_sample_source(tmp_path, "pkg-test", "1.0.0")
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com",
+        group="testgroup",
+        committer_name="bot",
+        committer_email="bot@example.com",
+    )
+
+    tag1 = publisher.publish_source(
+        source_path=source_file,
+        package="pkg-test",
+        version="1.0.0",
+        workspace_dir=workspace,
+        dry_run=True,
+    )
+    assert tag1 == "pkg-test/1.0.0"
+
+    # Re-publish identical bytes with allow_overwrite=True -> nothing staged; must still succeed.
+    tag2 = publisher.publish_source(
+        source_path=source_file,
+        package="pkg-test",
+        version="1.0.0",
+        workspace_dir=workspace,
+        allow_overwrite=True,
+        dry_run=True,
+    )
+    assert tag2 == "pkg-test/1.0.0"
+
+
 def test_overwrite_protection_different_content(tmp_path: Path):
     source1 = create_sample_source(tmp_path, "pkg-test", "1.0.0", filename="pkg-test-1.0.0-v1.tar.gz", extra_content="v1")
     source2 = create_sample_source(tmp_path, "pkg-test", "1.0.0", filename="pkg-test-1.0.0-v2.tar.gz", extra_content="v2_modified")
@@ -856,6 +904,56 @@ def test_publish_source_signing_and_legacy_unlinking_mocked(tmp_path: Path, monk
     assert verify_calls[0][1] == "verify-blob-attestation"
     key_idx = verify_calls[0].index("--key")
     assert verify_calls[0][key_idx + 1] == str(pub_file)
+
+
+def test_publish_fails_closed_when_lightwell_attestations_incomplete(tmp_path: Path, monkeypatch):
+    """A signed publish must fail closed if the attestation step leaves .lightwell incomplete.
+
+    Even when attestation reports success, publish() re-verifies the on-disk Lightwell
+    envelopes before committing. Here attestation writes only metadata.dsse.json, so the
+    missing provenance.dsse.json must abort the publish before any tag is created.
+    """
+    from taisce_cuan.provenance.verify import ProvenanceVerificationError
+
+    source_file = create_sample_source(tmp_path, "signed-pkg", "1.0.0")
+    workspace = tmp_path / "workspace"
+
+    key_file = tmp_path / "signing.key"
+    key_file.write_text("private key bytes")
+
+    def incomplete_attest(*, verified, repo_dir, repo_name, sign_key=None, public_key=None, dry_run=False, **kwargs):
+        # Simulate attestation that produces metadata but omits the required PyPI provenance envelope.
+        lightwell_dir = repo_dir / ".lightwell"
+        lightwell_dir.mkdir(parents=True, exist_ok=True)
+        (lightwell_dir / "metadata.dsse.json").write_text("{}\n")
+        return None
+
+    monkeypatch.setattr("taisce_cuan.source.mirror.attest_source_mirror", incomplete_attest)
+
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com",
+        group="testgroup",
+        committer_name="bot",
+        committer_email="bot@example.com",
+    )
+
+    with pytest.raises(ProvenanceVerificationError, match="missing .lightwell/provenance.dsse.json"):
+        publisher.publish_source(
+            source_path=source_file,
+            package="signed-pkg",
+            version="1.0.0",
+            workspace_dir=workspace,
+            source_registry="pypi.org",
+            sign_key=str(key_file),
+            dry_run=True,
+        )
+
+    # No tag may exist after a fail-closed publish.
+    repo_dir = workspace / "pypi.org-signed-pkg"
+    tags = subprocess.run(
+        ["git", "tag", "--list"], cwd=repo_dir, capture_output=True, text=True
+    ).stdout.strip()
+    assert tags == ""
 
 
 def test_rhtl_metadata_binds_validated_closure_and_registry(tmp_path: Path, monkeypatch):

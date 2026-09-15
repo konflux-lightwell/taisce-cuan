@@ -490,3 +490,59 @@ def test_verify_blob_attestation_targets_acquired_and_never_resigns(monkeypatch,
         verify_blob_attestation(source, signature, str(key))
 
 
+def test_verify_blob_attestation_falls_back_to_bundle_flag(monkeypatch, tmp_path: Path):
+    """Newer cosign rejects --signature; verification must retry with --bundle and succeed."""
+    source = tmp_path / "downloads" / "original.tar.gz"
+    signature = tmp_path / "provenance.dsse.json"
+    key = tmp_path / "release3.pub"
+    source.parent.mkdir()
+    source.write_bytes(b"original")
+    signature.write_text("{}\n")
+    key.write_text("public")
+
+    captured: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        captured.append(command)
+        if "--signature" in command:
+            return SimpleNamespace(returncode=1, stderr="Error: unknown flag: --signature\nuse --bundle")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr("taisce_cuan.provenance.verify.shutil.which", lambda _: "/bin/cosign")
+    monkeypatch.setattr("taisce_cuan.provenance.verify.subprocess.run", fake_run)
+
+    # Must not raise: the --bundle retry succeeds.
+    verify_blob_attestation(source, signature, str(key))
+
+    assert len(captured) == 2
+    assert "--signature" in captured[0]
+    assert "--bundle" in captured[1]
+    assert str(signature) in captured[1]
+
+
+def test_verify_blob_attestation_does_not_retry_on_genuine_failure(monkeypatch, tmp_path: Path):
+    """A real signature mismatch (not a CLI-compat error) must fail closed without a --bundle retry."""
+    source = tmp_path / "downloads" / "original.tar.gz"
+    signature = tmp_path / "provenance.dsse.json"
+    key = tmp_path / "release3.pub"
+    source.parent.mkdir()
+    source.write_bytes(b"original")
+    signature.write_text("{}\n")
+    key.write_text("public")
+
+    captured: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        captured.append(command)
+        return SimpleNamespace(returncode=1, stderr="signature verification failed")
+
+    monkeypatch.setattr("taisce_cuan.provenance.verify.shutil.which", lambda _: "/bin/cosign")
+    monkeypatch.setattr("taisce_cuan.provenance.verify.subprocess.run", fake_run)
+
+    with pytest.raises(RuntimeError, match="cosign verify-blob-attestation failed"):
+        verify_blob_attestation(source, signature, str(key))
+
+    assert len(captured) == 1
+    assert all("--bundle" not in arg for arg in captured[0])
+
+

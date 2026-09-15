@@ -218,11 +218,24 @@ def verify_blob_attestation(
     cosign_bin = shutil.which("cosign")
     if not cosign_bin:
         raise RuntimeError("Cosign CLI is required for attestation verification")
-    result = subprocess.run([
+    cmd_sig = [
         cosign_bin, "verify-blob-attestation", "--insecure-ignore-tlog",
         "--type", predicate_type, "--key", key,
         "--signature", str(signature_file), str(source_file),
-    ], capture_output=True, text=True, check=False)
+    ]
+    result = subprocess.run(cmd_sig, capture_output=True, text=True, check=False)
+    if result.returncode != 0 and (
+        "use --bundle" in result.stderr
+        or "invalid payloadType" in result.stderr
+        or "unknown flag: --signature" in result.stderr
+    ):
+        cmd_bundle = [
+            cosign_bin, "verify-blob-attestation", "--insecure-ignore-tlog",
+            "--type", predicate_type, "--key", key,
+            "--bundle", str(signature_file), str(source_file),
+        ]
+        result = subprocess.run(cmd_bundle, capture_output=True, text=True, check=False)
+
     if result.returncode != 0:
         raise RuntimeError(f"cosign verify-blob-attestation failed (exit {result.returncode}): {result.stderr}")
 

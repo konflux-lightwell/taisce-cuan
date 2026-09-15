@@ -41,6 +41,7 @@ from taisce_cuan.provenance.verify import (
     copy_verified_evidence,
     extract_pep740_predicate_type,
     verify_blob_attestation,
+    verify_lightwell_attestations,
     verify_normalized_source_artifact,
 )
 from taisce_cuan.sdist import canonicalize_name, extract_sdist_to_source
@@ -368,10 +369,19 @@ class GitMirrorPublisher:
             dry_run=request.dry_run,
         )
 
-        # 8. Stage, commit, tag, and atomic push
+        # 8. Verify Lightwell attestations
+        verify_lightwell_attestations(
+            lightwell_dir,
+            route=verified.route,
+            signed=bool(request.sign_key),
+        )
+
+        # 9. Stage, commit, tag, and atomic push
         subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
-        commit_msg = f"ingest: {canonical} {request.version} from {verified.registry}\n\nsha256: {source_sha256}"
-        subprocess.run(["git", "commit", "-m", commit_msg], cwd=repo_dir, check=True)
+        has_staged = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=repo_dir).returncode != 0
+        if has_staged:
+            commit_msg = f"ingest: {canonical} {request.version} from {verified.registry}\n\nsha256: {source_sha256}"
+            subprocess.run(["git", "commit", "-m", commit_msg], cwd=repo_dir, check=True)
 
         tag_flag = ["-f"] if request.allow_overwrite else []
         subprocess.run(["git", "tag", *tag_flag, tag_name], cwd=repo_dir, check=True)

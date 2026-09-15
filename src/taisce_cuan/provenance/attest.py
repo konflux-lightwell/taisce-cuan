@@ -238,6 +238,22 @@ class CosignAttestationSigner:
             ]
             res = subprocess.run(cmd, capture_output=True, text=True, check=False)
 
+            if res.returncode != 0 and (
+                "must specify --bundle" in res.stderr
+                or "unknown flag: --output-file" in res.stderr
+            ):
+                cmd_v3 = [
+                    self.cosign_bin,
+                    "attest-blob",
+                    str(source_file),
+                    f"--predicate={pred_tmp_path}",
+                    "--type=https://slsa.dev/provenance/v1",
+                    f"--key={key_str}",
+                    "--yes",
+                    f"--bundle={output_provenance_file}",
+                ]
+                res = subprocess.run(cmd_v3, capture_output=True, text=True, check=False)
+
             if res.returncode != 0 or not output_provenance_file.exists():
                 raise RuntimeError(
                     f"cosign attest-blob failed (exit {res.returncode}): {res.stderr}"

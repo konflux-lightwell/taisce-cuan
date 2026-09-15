@@ -149,6 +149,62 @@ def test_cosign_attestation_signer_mocked_invocation(tmp_path: Path, monkeypatch
     assert any(arg.startswith("--predicate=") for arg in captured[0])
 
 
+def test_cosign_signer_falls_back_to_bundle_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Newer cosign rejects --output-file; signing must retry with --bundle and produce the envelope."""
+    key_file = tmp_path / "key.pem"
+    key_file.write_text("dummy key")
+    out_file = tmp_path / "metadata.dsse.json"
+
+    captured: list[list[str]] = []
+    monkeypatch.setattr("taisce_cuan.provenance.attest.shutil.which", lambda _: "/bin/cosign")
+
+    def fake_run(command, **kwargs):
+        captured.append(command)
+        if any(arg.startswith("--bundle=") for arg in command):
+            out_file.write_text('{"payloadType":"application/vnd.in-toto+json"}')
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=1, stdout="", stderr="Error: unknown flag: --output-file")
+
+    monkeypatch.setattr("taisce_cuan.provenance.attest.subprocess.run", fake_run)
+
+    signer = CosignAttestationSigner()
+    verified = make_dummy_verified(tmp_path)
+    metadata = build_ingestion_metadata(verified, "repo")
+
+    result = signer.sign(metadata, verified.artifact.sdist, str(key_file), out_file)
+    assert result == out_file
+    assert out_file.exists()
+    assert len(captured) == 2
+    assert any(arg.startswith("--output-file=") for arg in captured[0])
+    assert any(arg.startswith("--bundle=") for arg in captured[1])
+
+
+def test_cosign_signer_fails_closed_on_genuine_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A real signing error (not a CLI-compat flag issue) must fail closed without a --bundle retry."""
+    key_file = tmp_path / "key.pem"
+    key_file.write_text("dummy key")
+    out_file = tmp_path / "metadata.dsse.json"
+
+    captured: list[list[str]] = []
+    monkeypatch.setattr("taisce_cuan.provenance.attest.shutil.which", lambda _: "/bin/cosign")
+
+    def fake_run(command, **kwargs):
+        captured.append(command)
+        return SimpleNamespace(returncode=1, stdout="", stderr="Error: signing failed: bad key")
+
+    monkeypatch.setattr("taisce_cuan.provenance.attest.subprocess.run", fake_run)
+
+    signer = CosignAttestationSigner()
+    verified = make_dummy_verified(tmp_path)
+    metadata = build_ingestion_metadata(verified, "repo")
+
+    with pytest.raises(RuntimeError, match="cosign attest-blob failed"):
+        signer.sign(metadata, verified.artifact.sdist, str(key_file), out_file)
+
+    assert len(captured) == 1
+    assert all(not arg.startswith("--bundle=") for arg in captured[0])
+
+
 @pytest.mark.skipif(not shutil.which("cosign"), reason="cosign CLI binary is not installed")
 def test_cosign_signing_success_and_temp_predicate_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("COSIGN_PASSWORD", "")
