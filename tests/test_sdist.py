@@ -145,3 +145,42 @@ def test_inspect_sdist_metadata_fallback_filename(tmp_path: Path):
     pkg, ver = inspect_sdist_metadata(sdist_file)
     assert pkg == "fallback_pkg"
     assert ver == "0.10.2b1"
+
+
+def test_fetcher_resets_per_fetch_state(tmp_path: Path):
+    from taisce_cuan.source import SdistSourceFetcher
+    import httpx
+
+    def handler(request: httpx.Request):
+        if "pypi.org" in str(request.url):
+            return httpx.Response(
+                200,
+                json={
+                    "urls": [
+                        {
+                            "filename": "demo-1.0.0.tar.gz",
+                            "url": "https://files.pythonhosted.org/demo-1.0.0.tar.gz",
+                            "digests": {"sha256": "abcdef"},
+                            "size": 10,
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    fetcher = SdistSourceFetcher(client=client)
+    # Simulate leftover RHTL state from a previous query
+    fetcher.last_rhtl_index = b"leftover index"
+    fetcher.last_advertised_provenance = b"leftover prov"
+
+    # Mock download_exact
+    fetcher.download_exact = lambda url, dest, sha, size: dest.write_bytes(b"dummy")  # type: ignore[assignment]
+
+    dest, info, _ = fetcher.fetch("demo", "1.0.0", tmp_path, registries="pypi.org")
+    # Verified: RHTL state was reset, so no leftover rhtl index was carried over
+    assert fetcher.last_rhtl_index is None
+    assert fetcher.last_advertised_provenance is None
+    assert not (tmp_path / "rhtl-index.pep691.json").exists()
+
+
