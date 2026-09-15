@@ -266,13 +266,13 @@ class GitMirrorPublisher:
         return None
 
     @staticmethod
-    def verify_blob_attestation(
+    def _run_cosign_verify(
         source_file: Path,
-        signature_file: Path,
+        attestation_file: Path,
         public_key: str,
-        predicate_type: str = "https://slsa.dev/provenance/v1",
+        predicate_type: str,
+        sig_flag: str,
     ) -> None:
-        """Verify a Cosign DSSE blob, failing closed before any publication."""
         key = (public_key or "").strip()
         if not key:
             raise ValueError("public verification key is required for attestation verification")
@@ -284,7 +284,7 @@ class GitMirrorPublisher:
         result = subprocess.run([
             cosign_bin, "verify-blob-attestation", "--insecure-ignore-tlog",
             "--type", predicate_type, "--key", key,
-            "--signature", str(signature_file), str(source_file),
+            sig_flag, str(attestation_file), str(source_file),
         ], capture_output=True, text=True, check=False)
         if result.returncode != 0:
             raise RuntimeError(
@@ -292,6 +292,32 @@ class GitMirrorPublisher:
                 f"\n--- stderr ---\n{result.stderr}"
                 f"\n--- stdout ---\n{result.stdout}"
             )
+
+    @staticmethod
+    def verify_blob_attestation(
+        source_file: Path,
+        signature_file: Path,
+        public_key: str,
+        predicate_type: str = "https://slsa.dev/provenance/v1",
+    ) -> None:
+        """Verify a bare DSSE envelope produced by adapt_rhtl_pep740 (RHTL path)."""
+        GitMirrorPublisher._run_cosign_verify(
+            source_file, signature_file, public_key, predicate_type,
+            f"--signature={signature_file}",
+        )
+
+    @staticmethod
+    def verify_bundle_attestation(
+        source_file: Path,
+        bundle_file: Path,
+        public_key: str,
+        predicate_type: str = "https://slsa.dev/provenance/v1",
+    ) -> None:
+        """Verify a sigstore bundle produced by cosign attest-blob --bundle."""
+        GitMirrorPublisher._run_cosign_verify(
+            source_file, bundle_file, public_key, predicate_type,
+            f"--bundle={bundle_file}",
+        )
 
     def sign_attestation(
         self,
@@ -334,7 +360,7 @@ class GitMirrorPublisher:
                 "--type=https://slsa.dev/provenance/v1",
                 f"--key={key_str}",
                 "--yes",
-                f"--output-file={output_provenance_file}",
+                f"--bundle={output_provenance_file}",
             ]
             res = subprocess.run(cmd, capture_output=True, text=True, check=False)
             if res.returncode != 0 or not output_provenance_file.exists():
@@ -697,7 +723,7 @@ class GitMirrorPublisher:
                 elif Path("/etc/signing-secret/public.pem").is_file():
                     verification_key = "/etc/signing-secret/public.pem"
             if verification_key:
-                self.verify_blob_attestation(
+                self.verify_bundle_attestation(
                     metadata_file,
                     metadata_attestation,
                     verification_key,
