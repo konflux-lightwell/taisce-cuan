@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+from typing import Any
+
 from taisce_cuan.source.artifact import (
     AcquiredSourceArtifact,
     ArtifactError,
@@ -31,6 +33,7 @@ from taisce_cuan.source.fetch import (
 __all__ = [
     "AcquiredSourceArtifact",
     "ArtifactError",
+    "GitMirrorPublisher",
     "MAX_DOWNLOAD_BYTES",
     "NormalizedSourceArtifact",
     "PYPI_API_DEFAULT",
@@ -38,4 +41,14 @@ __all__ = [
     "SUPPORTED_REGISTRIES",
     "SdistSourceFetcher",
     "SdistSourceInfo",
+    "_is_rhtl_registry",
+    "parse_version_safe",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name in ("GitMirrorPublisher", "_is_rhtl_registry", "parse_version_safe"):
+        from taisce_cuan.source import mirror
+
+        return getattr(mirror, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

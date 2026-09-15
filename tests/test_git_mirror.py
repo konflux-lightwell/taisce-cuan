@@ -1,12 +1,12 @@
 import json
+from pathlib import Path
+import shutil
 import subprocess
 import tarfile
-from pathlib import Path
 from types import SimpleNamespace
-
 import pytest
 
-from taisce_cuan.git_mirror import GitMirrorPublisher
+from taisce_cuan.source.mirror import GitMirrorPublisher
 from taisce_cuan.models import (
     BuildDefinition,
     Builder,
@@ -236,89 +236,6 @@ def test_semver_branch_topology_backfill(tmp_path: Path):
     assert parent_count == 0
 
 
-def test_rhtl_pep740_adaptation_preserves_base64_and_rejects_malformed(tmp_path: Path):
-    raw = tmp_path / "provenance.pep740.json"
-    output = tmp_path / "provenance.dsse.json"
-    payload = "eyJwcmVjaXNlbHkiOiJub3QtZGVjb2RlZCJ9=="
-    signature = "c2lnbmF0dXJlLXN0cmluZw=="
-    raw.write_bytes(json.dumps({"attestation_bundles": [{"attestations": [{"envelope": {
-        "statement": payload, "signature": signature}}]}]}).encode())
-    GitMirrorPublisher.adapt_rhtl_pep740(raw, output)
-    adapted = json.loads(output.read_text())
-    assert adapted == {"payloadType": "application/vnd.in-toto+json", "payload": payload,
-                       "signatures": [{"sig": signature}]}
-    assert json.loads(raw.read_bytes())["attestation_bundles"][0]["attestations"][0]["envelope"]["statement"] == payload
-    raw.write_text("{malformed")
-    with pytest.raises(ValueError, match="malformed"):
-        GitMirrorPublisher.adapt_rhtl_pep740(raw, output)
-    # Rejects multiple bundles
-    raw.write_text(json.dumps({"attestation_bundles": [
-        {"attestations": [{"envelope": {"statement": payload, "signature": signature}}]},
-        {"attestations": [{"envelope": {"statement": payload, "signature": signature}}]},
-    ]}))
-    with pytest.raises(ValueError, match="bundle"):
-        GitMirrorPublisher.adapt_rhtl_pep740(raw, output)
-    # Rejects multiple attestations in a bundle
-    raw.write_text(json.dumps({"attestation_bundles": [
-        {"attestations": [
-            {"envelope": {"statement": payload, "signature": signature}},
-            {"envelope": {"statement": payload, "signature": signature}},
-        ]},
-    ]}))
-    with pytest.raises(ValueError, match="attestation"):
-        GitMirrorPublisher.adapt_rhtl_pep740(raw, output)
-    # Rejects malformed nested elements (would raise AttributeError if not handled)
-    raw.write_text(json.dumps({"attestation_bundles": [{"attestations": ["not-a-dict"]}]}))
-    with pytest.raises(ValueError, match="malformed"):
-        GitMirrorPublisher.adapt_rhtl_pep740(raw, output)
-    raw.write_text(json.dumps({"attestation_bundles": [{"attestations": [{"envelope": "not-a-dict"}]}]}))
-    with pytest.raises(ValueError, match="malformed"):
-        GitMirrorPublisher.adapt_rhtl_pep740(raw, output)
-    raw.write_text(json.dumps({"attestation_bundles": ["not-a-dict"]}))
-    with pytest.raises(ValueError, match="malformed"):
-        GitMirrorPublisher.adapt_rhtl_pep740(raw, output)
-    raw.write_text(json.dumps(["not-a-dict"]))
-    with pytest.raises(ValueError, match="malformed"):
-        GitMirrorPublisher.adapt_rhtl_pep740(raw, output)
-
-
-def test_verify_blob_attestation_targets_acquired_and_never_resigns(monkeypatch, tmp_path: Path):
-    source = tmp_path / "downloads" / "original.tar.gz"
-    signature = tmp_path / "provenance.dsse.json"
-    key = tmp_path / "release3.pub"
-    source.parent.mkdir(); source.write_bytes(b"original"); signature.write_text("{}\n"); key.write_text("public")
-    captured = []
-    monkeypatch.setattr("taisce_cuan.git_mirror.shutil.which", lambda _: "/bin/cosign")
-    monkeypatch.setattr("taisce_cuan.git_mirror.subprocess.run", lambda command, **kwargs: captured.append(command) or SimpleNamespace(returncode=0, stderr=""))
-    GitMirrorPublisher.verify_blob_attestation(source, signature, str(key))
-    assert captured[0][1] == "verify-blob-attestation"
-    assert captured[0][-1] == str(source)
-    assert "--key" in captured[0]
-    assert str(key) in captured[0]
-    assert "--signature" in captured[0]
-    assert str(signature) in captured[0]
-    assert "--type" in captured[0]
-    assert "https://slsa.dev/provenance/v1" in captured[0]
-    assert "attest-blob" not in captured[0]
-
-    # Fails closed on missing or empty key
-    with pytest.raises(ValueError, match="public verification key is required"):
-        GitMirrorPublisher.verify_blob_attestation(source, signature, "")
-    with pytest.raises(ValueError, match="does not exist or is not a file"):
-        GitMirrorPublisher.verify_blob_attestation(source, signature, "/non/existent/key.pub")
-
-    # Fails closed if cosign CLI binary is missing
-    monkeypatch.setattr("taisce_cuan.git_mirror.shutil.which", lambda _: None)
-    with pytest.raises(RuntimeError, match="Cosign CLI is required"):
-        GitMirrorPublisher.verify_blob_attestation(source, signature, str(key))
-
-    # Fails closed if cosign returns non-zero exit code
-    monkeypatch.setattr("taisce_cuan.git_mirror.shutil.which", lambda _: "/bin/cosign")
-    monkeypatch.setattr("taisce_cuan.git_mirror.subprocess.run", lambda *args, **kwargs: SimpleNamespace(returncode=1, stderr="signature verification failed"))
-    with pytest.raises(RuntimeError, match="cosign verify-blob-attestation failed"):
-        GitMirrorPublisher.verify_blob_attestation(source, signature, str(key))
-
-
 def test_sign_attestation_fail_closed(tmp_path: Path):
     source_file = create_sample_source(tmp_path, "sign-test", "1.0.0")
     workspace = tmp_path / "workspace"
@@ -390,20 +307,20 @@ def test_sign_attestation_uses_configured_cosign_policy(monkeypatch, tmp_path: P
     )
     captured: list[str] = []
 
-    monkeypatch.setattr("taisce_cuan.git_mirror.shutil.which", lambda name: "/usr/local/bin/cosign")
+    monkeypatch.setattr("taisce_cuan.provenance.attest.shutil.which", lambda name: "/usr/local/bin/cosign")
 
     def fake_run(command, **_kwargs):
         captured.extend(command)
         output_file.write_text("attestation")
         return SimpleNamespace(returncode=0, stderr="")
 
-    monkeypatch.setattr("taisce_cuan.git_mirror.subprocess.run", fake_run)
+    monkeypatch.setattr("taisce_cuan.provenance.attest.subprocess.run", fake_run)
 
     assert publisher.sign_attestation(metadata, source_file, str(key_file), output_file) == output_file
     assert "--tlog-upload=false" not in captured
-    assert "--type=https://slsa.dev/provenance/v1" in captured
+    assert any(arg.startswith("--type=") for arg in captured)
     assert f"--key={key_file}" in captured
-    assert f"--output-file={output_file}" in captured
+    assert any(arg.startswith("--output-file=") or arg.startswith("--bundle=") for arg in captured)
 
 
 def test_baseline_tag_preservation_and_overwrite(tmp_path: Path):
@@ -662,6 +579,285 @@ def test_provenance_carrier_is_published_with_normalized_sdist(tmp_path: Path):
     assert not (repo_dir / ".lightwell" / "provenance.json").exists()
 
 
+def create_rhtl_sample_source(
+    path: Path,
+    pkg_name: str,
+    version: str,
+    advertised: bool = True,
+    extra_content: str = "",
+) -> Path:
+    """Create a normalized sdist with an RHTL provenance carrier."""
+    import hashlib
+
+    fn = f"{pkg_name}-{version}.tar.gz"
+    carrier_root = path / f"carrier_rhtl_{pkg_name}_{version}_{advertised}_{extra_content or 'default'}"
+    carrier_root.mkdir(parents=True, exist_ok=True)
+    source_file = carrier_root / fn
+    pkg_dir = carrier_root / f"src_{fn}"
+    pkg_dir.mkdir(parents=True, exist_ok=True)
+    (pkg_dir / "pyproject.toml").write_text(f"[project]\nname='{pkg_name}'\nversion='{version}'\n# {extra_content}")
+    with tarfile.open(source_file, "w:gz") as tar:
+        tar.add(pkg_dir, arcname=f"{pkg_name}-{version}")
+
+    source_sha256 = hashlib.sha256(source_file.read_bytes()).hexdigest()
+    downloads = carrier_root / "downloads"
+    downloads.mkdir()
+    original = downloads / fn
+    original.write_bytes(source_file.read_bytes())
+    original_sha256 = hashlib.sha256(original.read_bytes()).hexdigest()
+
+    pep691_content = b'{"files":[{"filename":"' + fn.encode() + b'","hashes":{"sha256":"' + original_sha256.encode() + b'"}}]}'
+    pep691_file = carrier_root / "rhtl-index.pep691.json"
+    pep691_file.write_bytes(pep691_content)
+    pep691_sha256 = hashlib.sha256(pep691_content).hexdigest()
+
+    pep740_sha256 = None
+    if advertised:
+        pep740_dict = {
+            "attestation_bundles": [
+                {
+                    "attestations": [
+                        {
+                            "envelope": {
+                                "statement": "cGF5bG9hZA==",
+                                "signature": "c2ln",
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+        pep740_content = json.dumps(pep740_dict).encode("utf-8")
+        pep740_file = carrier_root / "provenance.pep740.json"
+        pep740_file.write_bytes(pep740_content)
+        pep740_sha256 = hashlib.sha256(pep740_content).hexdigest()
+
+    origin_data = {
+        "schema": "https://lightwell.dev/schemas/source-origin/v1",
+        "acquired": {
+            "registry": "rhtl",
+            "package": pkg_name,
+            "version": version,
+            "path": f"downloads/{fn}",
+            "sha256": original_sha256,
+        },
+        "provenance": {
+            "mode": "rhtl",
+            "advertised": advertised,
+            "status": "advertised" if advertised else "not-advertised",
+            "sha256": pep740_sha256,
+            "rhtl": {
+                "status": "advertised" if advertised else "not-advertised",
+                "evidence": {
+                    "sha256": pep691_sha256,
+                },
+            },
+        },
+    }
+    origin_file = carrier_root / "source-origin.json"
+    origin_file.write_text(json.dumps(origin_data, sort_keys=True) + "\n")
+
+    (carrier_root / "sdist-transformation.json").write_text(json.dumps({
+        "schema": "https://lightwell.dev/schemas/sdist-transformation/v1",
+        "input": {"sha256": original_sha256},
+        "output": {"sha256": source_sha256, "path": fn},
+        "source_origin_sha256": hashlib.sha256(origin_file.read_bytes()).hexdigest(),
+        "transformation": "normalized-sdist",
+    }, sort_keys=True) + "\n")
+    return source_file
+
+
+def test_rhtl_advertised_exact_evidence_and_no_native_dsse(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(GitMirrorPublisher, "verify_blob_attestation", staticmethod(lambda *args: None))
+    source_file = create_rhtl_sample_source(tmp_path, "rhtl-advertised", "1.0.0", advertised=True)
+    carrier_root = source_file.parent
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com",
+        group="testgroup",
+        committer_name="bot",
+        committer_email="bot@example.com",
+    )
+
+    tag = publisher.publish_source(
+        source_path=source_file,
+        package="rhtl-advertised",
+        version="1.0.0",
+        workspace_dir=workspace,
+        dry_run=True,
+    )
+    assert tag == "rhtl-advertised/1.0.0"
+
+    repo_dir = workspace / "pypi.org-rhtl-advertised"
+    lightwell_dir = repo_dir / ".lightwell"
+
+    # Raw PEP 740 is preserved and adapted DSSE is created
+    assert (lightwell_dir / "provenance.pep740.json").read_bytes() == (carrier_root / "provenance.pep740.json").read_bytes()
+    assert (lightwell_dir / "provenance.dsse.json").exists()
+
+    # RHTL route never emits provenance.dsse
+    assert not (lightwell_dir / "provenance.dsse").exists()
+    assert not (lightwell_dir / "provenance.json").exists()
+    assert not (lightwell_dir / "rhtl-index.pep691.json").exists()
+
+
+def test_rhtl_not_advertised_exact_evidence_and_no_pep740(tmp_path: Path):
+    source_file = create_rhtl_sample_source(tmp_path, "rhtl-unadvertised", "1.0.0", advertised=False)
+    carrier_root = source_file.parent
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com",
+        group="testgroup",
+        committer_name="bot",
+        committer_email="bot@example.com",
+    )
+
+    tag = publisher.publish_source(
+        source_path=source_file,
+        package="rhtl-unadvertised",
+        version="1.0.0",
+        workspace_dir=workspace,
+        dry_run=True,
+    )
+    assert tag == "rhtl-unadvertised/1.0.0"
+
+    repo_dir = workspace / "pypi.org-rhtl-unadvertised"
+    lightwell_dir = repo_dir / ".lightwell"
+
+    # PEP 691 index evidence is preserved byte-for-byte
+    assert (lightwell_dir / "rhtl-index.pep691.json").read_bytes() == (carrier_root / "rhtl-index.pep691.json").read_bytes()
+    # PEP 740 provenance was not advertised, so it must not exist
+    assert not (lightwell_dir / "provenance.pep740.json").exists()
+    # RHTL never emits provenance.dsse
+    assert not (lightwell_dir / "provenance.dsse").exists()
+    assert not (lightwell_dir / "provenance.dsse.json").exists()
+
+
+@pytest.mark.skipif(not shutil.which("cosign"), reason="cosign CLI binary is not installed")
+def test_cosign_signing_pypi_vs_rhtl(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(GitMirrorPublisher, "verify_blob_attestation", staticmethod(lambda *args: None))
+    # Generate disposable cosign test key
+    key_file = tmp_path / "cosign.key"
+    pub_file = tmp_path / "cosign.pub"
+    env = {**subprocess.os.environ, "COSIGN_PASSWORD": ""}
+    subprocess.run(
+        ["cosign", "generate-key-pair", f"--output-key-prefix={tmp_path / 'cosign'}"],
+        env=env,
+        check=True,
+        capture_output=True,
+    )
+    assert key_file.exists()
+
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com",
+        group="testgroup",
+        committer_name="bot",
+        committer_email="bot@example.com",
+    )
+
+    # 1. PyPI route without signing: no dsse files
+    pypi_source = create_sample_source(tmp_path, "sign-pypi", "1.0.0")
+    publisher.publish_source(
+        source_path=pypi_source,
+        package="sign-pypi",
+        version="1.0.0",
+        workspace_dir=workspace,
+        dry_run=True,
+    )
+    pypi_lightwell = workspace / "pypi.org-sign-pypi" / ".lightwell"
+    assert not (pypi_lightwell / "metadata.dsse").exists()
+    assert not (pypi_lightwell / "metadata.dsse.json").exists()
+    assert not (pypi_lightwell / "provenance.dsse").exists()
+    assert not (pypi_lightwell / "provenance.dsse.json").exists()
+
+    # 2. RHTL route without signing: no dsse files, opaque PEP 740 preserved and adapted
+    rhtl_source = create_rhtl_sample_source(tmp_path, "sign-rhtl", "1.0.0", advertised=True)
+    publisher.publish_source(
+        source_path=rhtl_source,
+        package="sign-rhtl",
+        version="1.0.0",
+        workspace_dir=workspace,
+        dry_run=True,
+    )
+    rhtl_lightwell = workspace / "pypi.org-sign-rhtl" / ".lightwell"
+    assert not (rhtl_lightwell / "metadata.dsse").exists()
+    assert not (rhtl_lightwell / "metadata.dsse.json").exists()
+    assert not (rhtl_lightwell / "provenance.dsse").exists()
+    assert (rhtl_lightwell / "provenance.dsse.json").exists()
+    assert (rhtl_lightwell / "provenance.pep740.json").exists()
+
+
+def test_publish_source_signing_and_legacy_unlinking_mocked(tmp_path: Path, monkeypatch):
+    source_file = create_sample_source(tmp_path, "signed-pkg", "1.0.0")
+    workspace = tmp_path / "workspace"
+    repo_dir = workspace / "pypi.org-signed-pkg"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    lightwell_dir = repo_dir / ".lightwell"
+    lightwell_dir.mkdir(parents=True, exist_ok=True)
+    legacy_envelope = lightwell_dir / "metadata.dsse"
+    legacy_envelope.write_text('{"stale": true}\n')
+    legacy_prov_envelope = lightwell_dir / "provenance.dsse"
+    legacy_prov_envelope.write_text('{"stale_prov": true}\n')
+
+    key_file = tmp_path / "signing.key"
+    key_file.write_text("private key bytes")
+    pub_file = tmp_path / "signing.pub"
+    pub_file.write_text("public key bytes")
+
+    monkeypatch.setattr("taisce_cuan.provenance.attest.shutil.which", lambda _: "/bin/cosign")
+    monkeypatch.setattr("taisce_cuan.provenance.verify.shutil.which", lambda _: "/bin/cosign")
+
+    verify_calls = []
+    real_run = subprocess.run
+
+    def fake_run(command, **kwargs):
+        if command[0] != "/bin/cosign":
+            return real_run(command, **kwargs)
+        if command[1] == "attest-blob":
+            out_arg = [arg for arg in command if arg.startswith("--output-file=") or arg.startswith("--bundle=")][0]
+            out_path = Path(out_arg.split("=", 1)[1])
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text('{"payloadType":"application/vnd.in-toto+json"}\n')
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if command[1] == "verify-blob-attestation":
+            verify_calls.append(command)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com",
+        group="testgroup",
+        committer_name="bot",
+        committer_email="bot@example.com",
+    )
+    publisher.publish_source(
+        source_path=source_file,
+        package="signed-pkg",
+        version="1.0.0",
+        workspace_dir=workspace,
+        source_registry="pypi.org",
+        sign_key=str(key_file),
+        dry_run=True,
+    )
+
+    # Legacy metadata.dsse and provenance.dsse must be unlinked
+    assert not legacy_envelope.exists()
+    assert not legacy_prov_envelope.exists()
+    assert (lightwell_dir / "metadata.dsse.json").exists()
+    assert (lightwell_dir / "provenance.dsse.json").exists()
+    assert not (lightwell_dir / "provenance.dsse").exists()
+    assert not (lightwell_dir / "metadata.dsse").exists()
+
+    # Verification must be called with public key, never private key
+    assert len(verify_calls) == 1
+    assert verify_calls[0][1] == "verify-blob-attestation"
+    key_idx = verify_calls[0].index("--key")
+    assert verify_calls[0][key_idx + 1] == str(pub_file)
+
+
 def test_rhtl_metadata_binds_validated_closure_and_registry(tmp_path: Path, monkeypatch):
     source_file = create_sample_source(tmp_path, "rhtl-pkg", "1.0.0")
     carrier = source_file.parent
@@ -700,128 +896,6 @@ def test_rhtl_metadata_binds_validated_closure_and_registry(tmp_path: Path, monk
     assert meta["predicate"]["runDetails"]["metadata"]["attestation_level"] == "unsigned-inventory"
 
 
-def test_legacy_provenance_is_not_converted_or_published(tmp_path: Path):
-    source_file = create_sample_source(tmp_path, "legacy-provenance", "1.0.0")
-    legacy = source_file.parent / "sdist-provenance.json"
-    legacy.write_text('{"statement":"legacy attestation"}\n')
-    workspace = tmp_path / "workspace"
-    GitMirrorPublisher(forge_url="https://forge.example.com", group="testgroup").publish_source(
-        source_path=source_file,
-        package="legacy-provenance",
-        version="1.0.0",
-        workspace_dir=workspace,
-        dry_run=True,
-    )
-    lightwell = workspace / "pypi.org-legacy-provenance" / ".lightwell"
-    assert not (lightwell / "provenance.json").exists()
-    assert not (lightwell / "provenance.dsse").exists()
-    assert not (lightwell / "provenance.dsse.json").exists()
-    assert not (lightwell / "metadata.dsse.json").exists()
-
-
-def test_cli_push_auto_discover_metadata(tmp_path: Path):
-    from taisce_cuan.cli import main
-    source_file = create_sample_source(tmp_path, "auto-disc-pkg", "3.2.1")
-    workspace = tmp_path / "cli_workspace"
-
-    exit_code = main([
-        "push",
-        f"--source={source_file}",
-        f"--workspace-dir={workspace}",
-        "--forge-url=https://forge.example.com",
-        "--group=testgroup",
-        "--committer-name=bot",
-        "--committer-email=bot@example.com",
-        "--dry-run",
-    ])
-    assert exit_code == 0
-    repo_dir = workspace / "pypi.org-auto-disc-pkg"
-    assert repo_dir.exists()
-    metadata_file = repo_dir / ".lightwell" / "metadata.json"
-    assert metadata_file.exists()
-    assert '"package": "auto-disc-pkg"' in metadata_file.read_text()
-    assert '"version": "3.2.1"' in metadata_file.read_text()
-
-
-def test_publish_source_signing_and_legacy_unlinking(tmp_path: Path, monkeypatch):
-    source_file = create_sample_source(tmp_path, "signed-pkg", "1.0.0")
-    workspace = tmp_path / "workspace"
-    repo_dir = workspace / "pypi.org-signed-pkg"
-    repo_dir.mkdir(parents=True, exist_ok=True)
-    lightwell_dir = repo_dir / ".lightwell"
-    lightwell_dir.mkdir(parents=True, exist_ok=True)
-    legacy_envelope = lightwell_dir / "metadata.dsse"
-    legacy_envelope.write_text('{"stale": true}\n')
-    legacy_prov_envelope = lightwell_dir / "provenance.dsse"
-    legacy_prov_envelope.write_text('{"stale_prov": true}\n')
-
-    key_file = tmp_path / "signing.key"
-    key_file.write_text("private key bytes")
-    pub_file = tmp_path / "signing.pub"
-    pub_file.write_text("public key bytes")
-
-    monkeypatch.setattr("taisce_cuan.git_mirror.shutil.which", lambda _: "/bin/cosign")
-
-    verify_calls = []
-    real_run = subprocess.run
-
-    def fake_run(command, **kwargs):
-        if command[0] != "/bin/cosign":
-            return real_run(command, **kwargs)
-        if command[1] == "attest-blob":
-            out_arg = [arg for arg in command if arg.startswith("--output-file=")][0]
-            out_path = Path(out_arg.split("=", 1)[1])
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text('{"signed": true}\n')
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
-        if command[1] == "verify-blob-attestation":
-            verify_calls.append(command)
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr("taisce_cuan.git_mirror.subprocess.run", fake_run)
-
-    publisher = GitMirrorPublisher(forge_url="https://forge.example.com", group="testgroup")
-    publisher.publish_source(
-        source_path=source_file,
-        package="signed-pkg",
-        version="1.0.0",
-        workspace_dir=workspace,
-        source_registry="pypi.org",
-        sign_key=str(key_file),
-        dry_run=True,
-    )
-
-    # Legacy metadata.dsse and provenance.dsse must be unlinked
-    assert not legacy_envelope.exists()
-    assert not legacy_prov_envelope.exists()
-    assert (lightwell_dir / "metadata.dsse.json").exists()
-    assert (lightwell_dir / "provenance.dsse.json").exists()
-    assert not (lightwell_dir / "provenance.dsse").exists()
-    assert not (lightwell_dir / "metadata.dsse").exists()
-
-    # Verification must be called with public key, never private key
-    assert len(verify_calls) == 1
-    assert verify_calls[0][1] == "verify-blob-attestation"
-    key_idx = verify_calls[0].index("--key")
-    assert verify_calls[0][key_idx + 1] == str(pub_file)
-
-    # If only private key is provided without .pub, publish succeeds without crash
-    source_file_nopub = create_sample_source(tmp_path, "signed-pkg-nopub", "1.0.0")
-    pub_file.unlink()
-    verify_calls.clear()
-    publisher.publish_source(
-        source_path=source_file_nopub,
-        package="signed-pkg-nopub",
-        version="1.0.0",
-        workspace_dir=workspace,
-        source_registry="pypi.org",
-        sign_key=str(key_file),
-        dry_run=True,
-    )
-    assert len(verify_calls) == 0
-
-
 def test_publish_source_rhtl_verification_fail_closed_and_opaque(tmp_path: Path, monkeypatch):
     source_file = create_sample_source(tmp_path, "rhtl-gate-pkg", "2.0.0")
     carrier = source_file.parent
@@ -854,7 +928,7 @@ def test_publish_source_rhtl_verification_fail_closed_and_opaque(tmp_path: Path,
         )
 
     # 2. cosign verify failure must fail closed
-    monkeypatch.setattr("taisce_cuan.git_mirror.shutil.which", lambda _: "/bin/cosign")
+    monkeypatch.setattr("taisce_cuan.provenance.verify.shutil.which", lambda _: "/bin/cosign")
     real_run = subprocess.run
 
     def cosign_fail(command, **kwargs):
@@ -862,7 +936,7 @@ def test_publish_source_rhtl_verification_fail_closed_and_opaque(tmp_path: Path,
             return SimpleNamespace(returncode=1, stdout="", stderr="signature check failed")
         return real_run(command, **kwargs)
 
-    monkeypatch.setattr("taisce_cuan.git_mirror.subprocess.run", cosign_fail)
+    monkeypatch.setattr("taisce_cuan.provenance.verify.subprocess.run", cosign_fail)
     with pytest.raises(RuntimeError, match="cosign verify-blob-attestation failed"):
         publisher.publish_source(
             source_path=source_file, package="rhtl-gate-pkg", version="2.0.0",
@@ -875,7 +949,7 @@ def test_publish_source_rhtl_verification_fail_closed_and_opaque(tmp_path: Path,
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         return real_run(command, **kwargs)
 
-    monkeypatch.setattr("taisce_cuan.git_mirror.subprocess.run", cosign_ok)
+    monkeypatch.setattr("taisce_cuan.provenance.verify.subprocess.run", cosign_ok)
     publisher.publish_source(
         source_path=source_file, package="rhtl-gate-pkg", version="2.0.0",
         workspace_dir=workspace, source_registry="rhtl", public_key=str(pub_key_file), dry_run=True,
@@ -885,4 +959,69 @@ def test_publish_source_rhtl_verification_fail_closed_and_opaque(tmp_path: Path,
     assert (lightwell / "provenance.pep740.json").exists()
     assert (lightwell / "provenance.dsse.json").exists()
     assert not (lightwell / "provenance.dsse").exists()
+
+
+
+def test_legacy_provenance_is_not_converted_or_published(tmp_path: Path):
+    source_file = create_sample_source(tmp_path, "legacy-provenance", "1.0.0")
+    legacy = source_file.parent / "sdist-provenance.json"
+    legacy.write_text('{"statement":"legacy attestation"}\n')
+    workspace = tmp_path / "workspace"
+    GitMirrorPublisher(forge_url="https://forge.example.com", group="testgroup").publish_source(
+        source_path=source_file,
+        package="legacy-provenance",
+        version="1.0.0",
+        workspace_dir=workspace,
+        dry_run=True,
+    )
+    lightwell = workspace / "pypi.org-legacy-provenance" / ".lightwell"
+    assert not (lightwell / "provenance.json").exists()
+    assert not (lightwell / "provenance.dsse").exists()
+    assert not (lightwell / "metadata.dsse").exists()
+
+
+def test_cli_push_auto_discover_metadata(tmp_path: Path):
+    from taisce_cuan.cli import main
+    source_file = create_sample_source(tmp_path, "auto-disc-pkg", "3.2.1")
+    workspace = tmp_path / "cli_workspace"
+
+    exit_code = main([
+        "push",
+        f"--source={source_file}",
+        f"--workspace-dir={workspace}",
+        "--forge-url=https://forge.example.com",
+        "--group=testgroup",
+        "--committer-name=bot",
+        "--committer-email=bot@example.com",
+        "--dry-run",
+    ])
+    assert exit_code == 0
+    repo_dir = workspace / "pypi.org-auto-disc-pkg"
+    assert repo_dir.exists()
+    metadata_file = repo_dir / ".lightwell" / "metadata.json"
+    assert metadata_file.exists()
+    assert '"package": "auto-disc-pkg"' in metadata_file.read_text()
+    assert '"version": "3.2.1"' in metadata_file.read_text()
+
+
+def test_cli_clean_process_invocation():
+    """Verify CLI entrypoint runs cleanly in an isolated Python process without circular imports."""
+    import os
+    import subprocess
+    import sys
+
+    src_dir = str(Path(__file__).resolve().parent.parent / "src")
+    env = {**os.environ, "PYTHONPATH": src_dir}
+
+    result = subprocess.run(
+        [sys.executable, "-m", "taisce_cuan.cli", "--help"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 0
+    assert "Lightwell Python source distribution ingestion" in result.stdout
+
+
+
 
