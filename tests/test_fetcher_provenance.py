@@ -6,7 +6,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from taisce_cuan.fetcher import SdistFetcher
+from taisce_cuan.source.fetch import SdistSourceFetcher
 from taisce_cuan.git_mirror import GitMirrorPublisher
 
 
@@ -31,7 +31,7 @@ def test_rhtl_advertised_origin_binds_raw_provenance(tmp_path: Path):
         return httpx.Response(404, request=request)
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    fetcher = SdistFetcher("https://rhtl.example/simple", "https://pypi.example/pypi", client=client)
+    fetcher = SdistSourceFetcher("https://rhtl.example/simple", "https://pypi.example/pypi", client=client)
     fetcher.fetch("demo", "1.0", tmp_path, registries="rhtl")
     origin = json.loads((tmp_path / "source-origin.json").read_text())
     assert origin["acquired"]["path"] == "downloads/demo-1.0.tar.gz"
@@ -72,7 +72,7 @@ def test_rhtl_unavailable_provenance_binds_index_and_reason(tmp_path: Path):
         return httpx.Response(404, request=request)
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    fetcher = SdistFetcher("https://rhtl.example/simple", "https://pypi.example/pypi", client=client)
+    fetcher = SdistSourceFetcher("https://rhtl.example/simple", "https://pypi.example/pypi", client=client)
     fetcher.fetch("demo", "1.0", tmp_path, registries="rhtl")
     origin = json.loads((tmp_path / "source-origin.json").read_text())
     assert (tmp_path / "rhtl-index.pep691.json").read_bytes() == index_body
@@ -107,7 +107,7 @@ def test_pypi_only_omits_rhtl_evidence_path(tmp_path: Path):
         return httpx.Response(404, request=request)
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    fetcher = SdistFetcher("https://rhtl.example/simple", "https://pypi.example/pypi", client=client)
+    fetcher = SdistSourceFetcher("https://rhtl.example/simple", "https://pypi.example/pypi", client=client)
     fetcher.fetch("demo", "1.0", tmp_path, registries="pypi.org")
     assert not (tmp_path / "rhtl-index.pep691.json").exists()
     assert not (tmp_path / "provenance.pep740.json").exists()
@@ -149,7 +149,7 @@ def test_fetcher_resets_state_between_calls(tmp_path: Path):
         return httpx.Response(404, request=request)
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    fetcher = SdistFetcher("https://rhtl.example/simple", "https://pypi.example/pypi", client=client)
+    fetcher = SdistSourceFetcher("https://rhtl.example/simple", "https://pypi.example/pypi", client=client)
 
     dir_a = tmp_path / "a"
     fetcher.fetch("demo", "1.0", dir_a, registries="rhtl")
@@ -180,7 +180,7 @@ def test_rhtl_malformed_provenance_raises_error(tmp_path: Path, invalid_prov):
         return httpx.Response(404, request=request)
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    fetcher = SdistFetcher("https://rhtl.example/simple", "https://pypi.example/pypi", client=client)
+    fetcher = SdistSourceFetcher("https://rhtl.example/simple", "https://pypi.example/pypi", client=client)
     with pytest.raises(ValueError):
         fetcher.fetch("demo", "1.0", tmp_path, registries="rhtl")
     assert not (tmp_path / "downloads").exists()

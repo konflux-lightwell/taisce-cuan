@@ -22,7 +22,7 @@ import os
 import sys
 from pathlib import Path
 
-from taisce_cuan.fetcher import SdistFetcher
+from taisce_cuan.source.fetch import SdistSourceFetcher
 from taisce_cuan.git_mirror import GitMirrorPublisher
 from taisce_cuan.sdist import inspect_sdist_metadata
 
@@ -68,7 +68,7 @@ def create_parser() -> argparse.ArgumentParser:
 
 
 def handle_fetch(args: argparse.Namespace) -> int:
-    fetcher = SdistFetcher()
+    fetcher = SdistSourceFetcher()
     output_dir = Path(args.output_dir)
     try:
         sdist_path, source_info, _ = fetcher.fetch(
