@@ -295,8 +295,7 @@ def test_verify_blob_attestation_targets_acquired_and_never_resigns(monkeypatch,
     assert captured[0][-1] == str(source)
     assert "--key" in captured[0]
     assert str(key) in captured[0]
-    assert "--signature" in captured[0]
-    assert str(signature) in captured[0]
+    assert f"--signature={signature}" in captured[0]
     assert "--type" in captured[0]
     assert "https://slsa.dev/provenance/v1" in captured[0]
     assert "attest-blob" not in captured[0]
@@ -403,7 +402,7 @@ def test_sign_attestation_uses_configured_cosign_policy(monkeypatch, tmp_path: P
     assert "--tlog-upload=false" not in captured
     assert "--type=https://slsa.dev/provenance/v1" in captured
     assert f"--key={key_file}" in captured
-    assert f"--output-file={output_file}" in captured
+    assert f"--bundle={output_file}" in captured
 
 
 def test_baseline_tag_preservation_and_overwrite(tmp_path: Path):
@@ -769,7 +768,7 @@ def test_publish_source_signing_and_legacy_unlinking(tmp_path: Path, monkeypatch
         if command[0] != "/bin/cosign":
             return real_run(command, **kwargs)
         if command[1] == "attest-blob":
-            out_arg = [arg for arg in command if arg.startswith("--output-file=")][0]
+            out_arg = [arg for arg in command if arg.startswith("--bundle=")][0]
             out_path = Path(out_arg.split("=", 1)[1])
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text('{"signed": true}\n')
