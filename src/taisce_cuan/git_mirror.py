@@ -287,7 +287,11 @@ class GitMirrorPublisher:
             "--signature", str(signature_file), str(source_file),
         ], capture_output=True, text=True, check=False)
         if result.returncode != 0:
-            raise RuntimeError(f"cosign verify-blob-attestation failed (exit {result.returncode}): {result.stderr}")
+            raise RuntimeError(
+                f"cosign verify-blob-attestation failed (exit {result.returncode})"
+                f"\n--- stderr ---\n{result.stderr}"
+                f"\n--- stdout ---\n{result.stdout}"
+            )
 
     def sign_attestation(
         self,
