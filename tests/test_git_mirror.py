@@ -144,27 +144,15 @@ def test_overwrite_protection_different_content(tmp_path: Path):
         dry_run=True,
     )
 
-    # Re-pushing with different content and allow_overwrite=False must fail
-    with pytest.raises(ValueError, match="allow_overwrite is False"):
+    # A version is ingested exactly once: re-ingesting with different content must fail
+    with pytest.raises(ValueError, match="refusing to overwrite an ingested version"):
         publisher.publish_source(
             source_path=source2,
             package="pkg-test",
             version="1.0.0",
             workspace_dir=workspace,
-            allow_overwrite=False,
             dry_run=True,
         )
-
-    # Re-pushing with allow_overwrite=True succeeds
-    tag = publisher.publish_source(
-        source_path=source2,
-        package="pkg-test",
-        version="1.0.0",
-        workspace_dir=workspace,
-        allow_overwrite=True,
-        dry_run=True,
-    )
-    assert tag == "pkg-test/1.0.0"
 
 
 def test_semver_branch_topology_backfill(tmp_path: Path):
@@ -405,7 +393,7 @@ def test_sign_attestation_uses_configured_cosign_policy(monkeypatch, tmp_path: P
     assert f"--bundle={output_file}" in captured
 
 
-def test_baseline_tag_preservation_and_overwrite(tmp_path: Path):
+def test_baseline_tag_preserved_on_idempotent_reingest(tmp_path: Path):
     source_file = create_sample_source(tmp_path, "pkg-base", "1.0.0")
     workspace = tmp_path / "workspace"
     publisher = GitMirrorPublisher(
@@ -436,31 +424,16 @@ def test_baseline_tag_preservation_and_overwrite(tmp_path: Path):
     backport_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo_dir, text=True).strip()
     subprocess.run(["git", "tag", "-f", "baseline/1.0.0", backport_commit], cwd=repo_dir, check=True)
 
-    # Re-running ingestion without allow_overwrite must preserve the advanced baseline tag
+    # Re-ingesting the same version (idempotent no-op) must preserve the advanced baseline tag
     publisher.publish_source(
         source_path=source_file,
         package="pkg-base",
         version="1.0.0",
         workspace_dir=workspace,
-        allow_overwrite=False,
         dry_run=True,
     )
     current_base = subprocess.check_output(["git", "rev-parse", "baseline/1.0.0^{commit}"], cwd=repo_dir, text=True).strip()
     assert current_base == backport_commit
-
-    # Re-running ingestion with allow_overwrite=True resets baseline tag to canonical commit
-    publisher.publish_source(
-        source_path=source_file,
-        package="pkg-base",
-        version="1.0.0",
-        workspace_dir=workspace,
-        allow_overwrite=True,
-        dry_run=True,
-    )
-    reset_base = subprocess.check_output(["git", "rev-parse", "baseline/1.0.0^{commit}"], cwd=repo_dir, text=True).strip()
-    new_canonical = subprocess.check_output(["git", "rev-parse", "pkg-base/1.0.0^{commit}"], cwd=repo_dir, text=True).strip()
-    assert reset_base == new_canonical
-    assert reset_base != backport_commit
 
 
 def test_git_mirror_publisher_real_bare_remote(tmp_path: Path):
@@ -557,14 +530,13 @@ def test_git_mirror_publisher_real_bare_remote(tmp_path: Path):
     ).strip()
     assert verified_advanced_base == backport_commit
 
-    # Running a second version ingestion maintains the advanced baseline tag when allow_overwrite=False
+    # Running a second version ingestion maintains the advanced baseline tag
     source_200 = create_sample_source(tmp_path, "pkg-remote", "2.0.0")
     tag_200 = publisher.publish_source(
         source_path=source_200,
         package="pkg-remote",
         version="2.0.0",
         workspace_dir=workspace,
-        allow_overwrite=False,
         dry_run=False,
     )
     assert tag_200 == "pkg-remote/2.0.0"
@@ -588,43 +560,24 @@ def test_git_mirror_publisher_real_bare_remote(tmp_path: Path):
     assert remote_canonical_200 == remote_baseline_200 == remote_main_200
     assert remote_canonical_200 != remote_canonical_100
 
-    # 4c. Running with allow_overwrite=True force-updates both tags in the bare remote
+    # 4c. Re-ingesting an existing version with different content is refused over the real remote
     source_100_modified = create_sample_source(
         tmp_path, "pkg-remote", "1.0.0", filename="pkg-remote-1.0.0-mod.tar.gz", extra_content="force-overwrite"
     )
-    # First verify allow_overwrite=False raises ValueError when content differs
-    with pytest.raises(ValueError, match="allow_overwrite is False"):
+    with pytest.raises(ValueError, match="refusing to overwrite an ingested version"):
         publisher.publish_source(
             source_path=source_100_modified,
             package="pkg-remote",
             version="1.0.0",
             workspace_dir=workspace,
-            allow_overwrite=False,
             dry_run=False,
         )
 
-    # Now run with allow_overwrite=True
-    tag_100_overwritten = publisher.publish_source(
-        source_path=source_100_modified,
-        package="pkg-remote",
-        version="1.0.0",
-        workspace_dir=workspace,
-        allow_overwrite=True,
-        dry_run=False,
-    )
-    assert tag_100_overwritten == "pkg-remote/1.0.0"
-
-    # Verify both tags in the bare remote are updated to the newly generated commit
+    # The original tags in the bare remote remain untouched
     remote_canonical_100_after = subprocess.check_output(
         ["git", "rev-parse", "refs/tags/pkg-remote/1.0.0^{commit}"], cwd=remote_bare, text=True
     ).strip()
-    remote_baseline_100_after = subprocess.check_output(
-        ["git", "rev-parse", "refs/tags/baseline/1.0.0^{commit}"], cwd=remote_bare, text=True
-    ).strip()
-
-    assert remote_canonical_100_after == remote_baseline_100_after
-    assert remote_canonical_100_after != remote_canonical_100
-    assert remote_baseline_100_after != backport_commit
+    assert remote_canonical_100_after == remote_canonical_100
 
 
 def test_provenance_carrier_is_published_with_normalized_sdist(tmp_path: Path):
