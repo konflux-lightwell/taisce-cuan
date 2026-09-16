@@ -155,7 +155,43 @@ def test_overwrite_protection_different_content(tmp_path: Path):
         )
 
 
-def test_semver_branch_topology_backfill(tmp_path: Path):
+def test_each_version_seeds_a_rootless_stream_branch(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com",
+        group="testgroup",
+        committer_name="bot",
+        committer_email="bot@example.com",
+    )
+    repo_dir = workspace / "pypi.org-multi-ver"
+
+    def parent_count(ref: str) -> int:
+        out = subprocess.check_output(["git", "rev-list", "--parents", "-n", "1", ref], cwd=repo_dir, text=True)
+        return len(out.strip().split()) - 1
+
+    # Each version maps to stream/{major}.{minor} derived purely from its version,
+    # committed as a rootless (0-parent) orphan regardless of ingestion order.
+    for version, stream in [("1.0.0", "stream/1.0"), ("2.0.0", "stream/2.0"),
+                            ("1.1.0", "stream/1.1"), ("0.9.0", "stream/0.9")]:
+        source = create_sample_source(tmp_path, "multi-ver", version)
+        publisher.publish_source(
+            source_path=source,
+            package="multi-ver",
+            version=version,
+            workspace_dir=workspace,
+            dry_run=True,
+        )
+        branches = subprocess.check_output(["git", "branch", "--list"], cwd=repo_dir, text=True)
+        assert stream in branches
+        # The canonical tag is a rootless commit; no fabricated cross-version lineage.
+        assert parent_count(f"multi-ver/{version}") == 0
+
+    # No "main" branch is ever created; branches are one-per-minor-line.
+    branches = subprocess.check_output(["git", "branch", "--list"], cwd=repo_dir, text=True)
+    assert "main" not in branches
+
+
+def test_reingesting_same_minor_different_patch_is_refused(tmp_path: Path):
     workspace = tmp_path / "workspace"
     publisher = GitMirrorPublisher(
         forge_url="https://forge.example.com",
@@ -164,64 +200,20 @@ def test_semver_branch_topology_backfill(tmp_path: Path):
         committer_email="bot@example.com",
     )
 
-    # 1. Ingest 1.0.0
-    source_100 = create_sample_source(tmp_path, "multi-ver", "1.0.0")
+    source_110 = create_sample_source(tmp_path, "same-minor", "1.1.0")
     publisher.publish_source(
-        source_path=source_100,
-        package="multi-ver",
-        version="1.0.0",
-        workspace_dir=workspace,
-        dry_run=True,
+        source_path=source_110, package="same-minor", version="1.1.0",
+        workspace_dir=workspace, dry_run=True,
     )
 
-    # 2. Ingest 2.0.0 (newer -> advances main)
-    source_200 = create_sample_source(tmp_path, "multi-ver", "2.0.0")
-    publisher.publish_source(
-        source_path=source_200,
-        package="multi-ver",
-        version="2.0.0",
-        workspace_dir=workspace,
-        dry_run=True,
-    )
-
-    repo_dir = workspace / "pypi.org-multi-ver"
-
-    # Verify main is at 2.0.0 commit
-    head_show = subprocess.check_output(["git", "show", "HEAD:source/pyproject.toml"], cwd=repo_dir, text=True)
-    assert "version='2.0.0'" in head_show
-
-    # 3. Backfill 1.1.0 (between 1.0.0 and 2.0.0) -> branches stream/1.1 from 1.0.0
-    source_110 = create_sample_source(tmp_path, "multi-ver", "1.1.0")
-    publisher.publish_source(
-        source_path=source_110,
-        package="multi-ver",
-        version="1.1.0",
-        workspace_dir=workspace,
-        dry_run=True,
-    )
-
-    # Check that stream/1.1 exists
-    branches = subprocess.check_output(["git", "branch", "--list"], cwd=repo_dir, text=True)
-    assert "stream/1.1" in branches
-
-    # Check that 1.1.0 parent commit is 1.0.0 commit, not 2.0.0
-    tag_110_parents = subprocess.check_output(["git", "rev-parse", "multi-ver/1.1.0^"], cwd=repo_dir, text=True).strip()
-    tag_100_commit = subprocess.check_output(["git", "rev-parse", "multi-ver/1.0.0^{commit}"], cwd=repo_dir, text=True).strip()
-    assert tag_110_parents == tag_100_commit
-
-    # 4. Backfill 0.9.0 (older than all existing tags) -> creates orphan branch stream/0.9
-    source_090 = create_sample_source(tmp_path, "multi-ver", "0.9.0")
-    publisher.publish_source(
-        source_path=source_090,
-        package="multi-ver",
-        version="0.9.0",
-        workspace_dir=workspace,
-        dry_run=True,
-    )
-
-    # 0.9.0 should have 0 parent commits (orphan root commit)
-    parent_count = len(subprocess.check_output(["git", "rev-list", "--parents", "-n", "1", "multi-ver/0.9.0"], cwd=repo_dir, text=True).strip().split()) - 1
-    assert parent_count == 0
+    # A second patch in the same minor line maps to the existing stream/1.1;
+    # taisce-cuan seeds a stream once and refuses to advance it.
+    source_115 = create_sample_source(tmp_path, "same-minor", "1.1.5")
+    with pytest.raises(ValueError, match="Stream branch stream/1.1 already exists"):
+        publisher.publish_source(
+            source_path=source_115, package="same-minor", version="1.1.5",
+            workspace_dir=workspace, dry_run=True,
+        )
 
 
 def test_rhtl_pep740_adaptation_preserves_base64_and_rejects_malformed(tmp_path: Path):
@@ -471,13 +463,13 @@ def test_git_mirror_publisher_real_bare_remote(tmp_path: Path):
     remote_baseline_100 = subprocess.check_output(
         ["git", "rev-parse", "refs/tags/baseline/1.0.0^{commit}"], cwd=remote_bare, text=True
     ).strip()
-    # - refs/heads/main exists and is updated
-    remote_main_100 = subprocess.check_output(
-        ["git", "rev-parse", "refs/heads/main^{commit}"], cwd=remote_bare, text=True
+    # - refs/heads/stream/1.0 exists and points to the seeded commit
+    remote_stream_100 = subprocess.check_output(
+        ["git", "rev-parse", "refs/heads/stream/1.0^{commit}"], cwd=remote_bare, text=True
     ).strip()
 
     assert remote_canonical_100 == remote_baseline_100
-    assert remote_canonical_100 == remote_main_100
+    assert remote_canonical_100 == remote_stream_100
 
     # 4. Verify remote tag synchronization and overwrite protection over real git remote:
     # 4a. Re-running with same content is a no-op / succeeds
@@ -504,7 +496,7 @@ def test_git_mirror_publisher_real_bare_remote(tmp_path: Path):
     # 4b. Advancing remote baseline/<version> (simulating a backport CT)
     # Create a backport commit in bare remote and update baseline/1.0.0 tag to it
     tree_id = subprocess.check_output(
-        ["git", "rev-parse", "refs/heads/main^{tree}"], cwd=remote_bare, text=True
+        ["git", "rev-parse", "refs/heads/stream/1.0^{tree}"], cwd=remote_bare, text=True
     ).strip()
     backport_commit = subprocess.check_output(
         [
@@ -547,17 +539,17 @@ def test_git_mirror_publisher_real_bare_remote(tmp_path: Path):
     ).strip()
     assert remote_base_after_200 == backport_commit
 
-    # Verify 2.0.0 tags and main in bare remote
+    # Verify 2.0.0 tags and stream/2.0 in bare remote
     remote_canonical_200 = subprocess.check_output(
         ["git", "rev-parse", "refs/tags/pkg-remote/2.0.0^{commit}"], cwd=remote_bare, text=True
     ).strip()
     remote_baseline_200 = subprocess.check_output(
         ["git", "rev-parse", "refs/tags/baseline/2.0.0^{commit}"], cwd=remote_bare, text=True
     ).strip()
-    remote_main_200 = subprocess.check_output(
-        ["git", "rev-parse", "refs/heads/main^{commit}"], cwd=remote_bare, text=True
+    remote_stream_200 = subprocess.check_output(
+        ["git", "rev-parse", "refs/heads/stream/2.0^{commit}"], cwd=remote_bare, text=True
     ).strip()
-    assert remote_canonical_200 == remote_baseline_200 == remote_main_200
+    assert remote_canonical_200 == remote_baseline_200 == remote_stream_200
     assert remote_canonical_200 != remote_canonical_100
 
     # 4c. Re-ingesting an existing version with different content is refused over the real remote

@@ -97,7 +97,7 @@ def resolve_provenance_file(
 
 
 class GitMirrorPublisher:
-    """Manages git initialization, metadata creation, and pushing to Git forges with SemVer topology."""
+    """Manages git initialization, metadata creation, and pushing each version to a version-derived stream branch on a Git forge."""
 
     def __init__(
         self,
@@ -532,46 +532,31 @@ class GitMirrorPublisher:
                 f"Tag {tag_name} already exists with different content; refusing to overwrite an ingested version."
             )
 
-        # Determine target branch and base commit based on SemVer topology
+        # Determine the target branch. The branch name is derived solely from
+        # the target version, so a given version always maps to the same stream
+        # regardless of ingestion order:
+        #   stream/{epoch}{major}.{minor}
+        #
+        # "main" is only a fallback for versions that cannot be parsed.
         target_branch = "main"
 
-        if target_ver is not None and existing_tags:
-            highest_ver, highest_tag = existing_tags[-1]
+        if target_ver is not None:
+            stream_epoch = f"{target_ver.epoch}!" if target_ver.epoch else ""
+            target_branch = f"stream/{stream_epoch}{target_ver.major}.{target_ver.minor}"
 
-            if target_ver >= highest_ver:
-                target_branch = "main"
-                if subprocess.run(["git", "rev-parse", "--verify", "refs/remotes/origin/main"], cwd=repo_dir, capture_output=True).returncode == 0:
-                    subprocess.run(["git", "checkout", "-B", "main", "refs/remotes/origin/main"], cwd=repo_dir, capture_output=True, check=False)
-                else:
-                    try:
-                        subprocess.run(["git", "checkout", "main"], cwd=repo_dir, capture_output=True, check=False)
-                    except Exception:
-                        pass
-            else:
-                predecessors = [t for t in existing_tags if t[0] < target_ver]
-                stream_epoch = f"{target_ver.epoch}!" if target_ver.epoch else ""
-                major_minor_stream = f"stream/{stream_epoch}{target_ver.major}.{target_ver.minor}"
+            exists_local = subprocess.run(["git", "rev-parse", "--verify", f"refs/heads/{target_branch}"], cwd=repo_dir, capture_output=True).returncode == 0
+            exists_remote = subprocess.run(["git", "rev-parse", "--verify", f"refs/remotes/origin/{target_branch}"], cwd=repo_dir, capture_output=True).returncode == 0
+            if exists_local:
+                raise ValueError(
+                    f"Stream branch {target_branch} already exists locally; refusing to advance."
+                )
+            elif exists_remote:
+                raise ValueError(
+                    f"Stream branch {target_branch} already exists; refusing to advance it during ingestion."
+                )
 
-                # Check if stream branch already exists locally or on remote
-                existing_local = subprocess.check_output(["git", "branch", "--list", major_minor_stream], cwd=repo_dir, text=True).strip()
-                has_remote_stream = subprocess.run(["git", "rev-parse", "--verify", f"refs/remotes/origin/{major_minor_stream}"], cwd=repo_dir, capture_output=True).returncode == 0
-
-                if existing_local:
-                    logger.info(f"Checking out existing stream branch {major_minor_stream}")
-                    subprocess.run(["git", "checkout", major_minor_stream], cwd=repo_dir, check=True)
-                elif has_remote_stream:
-                    logger.info(f"Checking out remote stream branch {major_minor_stream}")
-                    subprocess.run(["git", "checkout", "-b", major_minor_stream, f"refs/remotes/origin/{major_minor_stream}"], cwd=repo_dir, check=True)
-                elif predecessors:
-                    nearest_ver, nearest_tag = predecessors[-1]
-                    logger.info(f"Backfill detected: branching {major_minor_stream} from predecessor {nearest_tag}")
-                    subprocess.run(["git", "checkout", "-b", major_minor_stream, nearest_tag], cwd=repo_dir, check=True)
-                else:
-                    logger.info(f"Backfill detected with no predecessor: creating orphan stream {major_minor_stream}")
-                    subprocess.run(["git", "checkout", "--orphan", major_minor_stream], cwd=repo_dir, check=True)
-                    subprocess.run(["git", "rm", "-rf", "."], cwd=repo_dir, capture_output=True, check=False)
-
-                target_branch = major_minor_stream
+            subprocess.run(["git", "checkout", "--orphan", target_branch], cwd=repo_dir, check=True)
+            subprocess.run(["git", "rm", "-rf", "."], cwd=repo_dir, capture_output=True, check=False)
 
         # Clean existing source/ directory before unpacking
         source_dir = repo_dir / "source"
