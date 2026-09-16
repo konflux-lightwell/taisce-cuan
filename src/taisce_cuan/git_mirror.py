@@ -388,6 +388,8 @@ class GitMirrorPublisher:
         canonical = canonicalize_name(package)
         tag_name = f"{canonical}/{version}"
         target_ver = parse_version_safe(version)
+        if target_ver is None:
+            raise ValueError(f"Cannot parse version {version!r}; refusing to mirror an unparseable version.")
 
         repo_name = f"pypi.org-{canonical}"
         repo_dir = workspace_dir / repo_name
@@ -536,27 +538,22 @@ class GitMirrorPublisher:
         # the target version, so a given version always maps to the same stream
         # regardless of ingestion order:
         #   stream/{epoch}{major}.{minor}
-        #
-        # "main" is only a fallback for versions that cannot be parsed.
-        target_branch = "main"
+        stream_epoch = f"{target_ver.epoch}!" if target_ver.epoch else ""
+        target_branch = f"stream/{stream_epoch}{target_ver.major}.{target_ver.minor}"
 
-        if target_ver is not None:
-            stream_epoch = f"{target_ver.epoch}!" if target_ver.epoch else ""
-            target_branch = f"stream/{stream_epoch}{target_ver.major}.{target_ver.minor}"
+        exists_local = subprocess.run(["git", "rev-parse", "--verify", f"refs/heads/{target_branch}"], cwd=repo_dir, capture_output=True).returncode == 0
+        exists_remote = subprocess.run(["git", "rev-parse", "--verify", f"refs/remotes/origin/{target_branch}"], cwd=repo_dir, capture_output=True).returncode == 0
+        if exists_local:
+            raise ValueError(
+                f"Stream branch {target_branch} already exists locally; refusing to advance."
+            )
+        elif exists_remote:
+            raise ValueError(
+                f"Stream branch {target_branch} already exists; refusing to advance it during ingestion."
+            )
 
-            exists_local = subprocess.run(["git", "rev-parse", "--verify", f"refs/heads/{target_branch}"], cwd=repo_dir, capture_output=True).returncode == 0
-            exists_remote = subprocess.run(["git", "rev-parse", "--verify", f"refs/remotes/origin/{target_branch}"], cwd=repo_dir, capture_output=True).returncode == 0
-            if exists_local:
-                raise ValueError(
-                    f"Stream branch {target_branch} already exists locally; refusing to advance."
-                )
-            elif exists_remote:
-                raise ValueError(
-                    f"Stream branch {target_branch} already exists; refusing to advance it during ingestion."
-                )
-
-            subprocess.run(["git", "checkout", "--orphan", target_branch], cwd=repo_dir, check=True)
-            subprocess.run(["git", "rm", "-rf", "."], cwd=repo_dir, capture_output=True, check=False)
+        subprocess.run(["git", "checkout", "--orphan", target_branch], cwd=repo_dir, check=True)
+        subprocess.run(["git", "rm", "-rf", "."], cwd=repo_dir, capture_output=True, check=False)
 
         # Clean existing source/ directory before unpacking
         source_dir = repo_dir / "source"
