@@ -378,7 +378,6 @@ class GitMirrorPublisher:
         version: str,
         workspace_dir: Path,
         source_registry: str = "pypi.org",
-        allow_overwrite: bool = False,
         sign_key: Optional[str] = None,
         provenance_path: Optional[Path] = None,
         public_key: Optional[str] = None,
@@ -525,16 +524,13 @@ class GitMirrorPublisher:
         existing_tags = self.get_existing_tags(repo_dir, canonical)
         existing_tag_names = [t[1] for t in existing_tags]
 
-        # Overwrite / Idempotency check
         if tag_name in existing_tag_names:
-            if not allow_overwrite:
-                if self.check_existing_tag_content(repo_dir, tag_name, source_sha256):
-                    logger.info(f"Tag {tag_name} already exists with identical SHA-256 ({source_sha256}). Nothing to do.")
-                    return tag_name
-                raise ValueError(
-                    f"Tag {tag_name} already exists with different content and allow_overwrite is False."
-                )
-            logger.warning(f"Tag {tag_name} exists but allow_overwrite=True; updating tag and baseline content.")
+            if self.check_existing_tag_content(repo_dir, tag_name, source_sha256):
+                logger.info(f"Tag {tag_name} already exists with identical SHA-256 ({source_sha256}). Nothing to do.")
+                return tag_name
+            raise ValueError(
+                f"Tag {tag_name} already exists with different content; refusing to overwrite an ingested version."
+            )
 
         # Determine target branch and base commit based on SemVer topology
         target_branch = "main"
@@ -743,8 +739,7 @@ class GitMirrorPublisher:
         subprocess.run(["git", "commit", "-m", commit_msg], cwd=repo_dir, check=True)
 
         # Tag creation
-        tag_flag = ["-f"] if allow_overwrite else []
-        subprocess.run(["git", "tag", *tag_flag, tag_name], cwd=repo_dir, check=True)
+        subprocess.run(["git", "tag", tag_name], cwd=repo_dir, check=True)
         logger.info(f"Tagged {tag_name} on branch {target_branch}")
 
         # Baseline tag creation (ADR-0005 initial baseline anchor)
@@ -754,8 +749,8 @@ class GitMirrorPublisher:
         ).stdout.strip()
 
         tags_to_push = [tag_name]
-        if not existing_baseline or allow_overwrite:
-            subprocess.run(["git", "tag", *tag_flag, baseline_tag], cwd=repo_dir, check=True)
+        if not existing_baseline:
+            subprocess.run(["git", "tag", baseline_tag], cwd=repo_dir, check=True)
             logger.info(f"Tagged initial {baseline_tag} on branch {target_branch}")
             tags_to_push.append(baseline_tag)
 
@@ -764,8 +759,6 @@ class GitMirrorPublisher:
             return tag_name
 
         push_cmd = ["git", "push", "--atomic", remote_url, target_branch, *tags_to_push]
-        if allow_overwrite:
-            push_cmd.insert(2, "-f")
 
         try:
             subprocess.run(push_cmd, cwd=repo_dir, check=True, capture_output=True, text=True)
@@ -784,7 +777,6 @@ class GitMirrorPublisher:
         version: str,
         workspace_dir: Path,
         source_registry: str = "pypi.org",
-        allow_overwrite: bool = False,
         sign_key: Optional[str] = None,
         provenance_path: Optional[Path] = None,
         public_key: Optional[str] = None,
@@ -797,7 +789,6 @@ class GitMirrorPublisher:
             version=version,
             workspace_dir=workspace_dir,
             source_registry=source_registry,
-            allow_overwrite=allow_overwrite,
             sign_key=sign_key,
             provenance_path=provenance_path,
             public_key=public_key,

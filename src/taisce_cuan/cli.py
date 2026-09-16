@@ -57,7 +57,6 @@ def create_parser() -> argparse.ArgumentParser:
     push_parser.add_argument("--auth-token", default=os.getenv("GITLAB_TOKEN") or os.getenv("GIT_AUTH_TOKEN"), help="Git forge access token")
     push_parser.add_argument("--committer-name", required=True, help="Git author and committer name")
     push_parser.add_argument("--committer-email", required=True, help="Git author and committer email")
-    push_parser.add_argument("--allow-overwrite", "--overwrite", action="store_true", help="Allow updating existing tag with different content")
     push_parser.add_argument("--sign-key", default=os.getenv("SIGN_KEY"), help="Path or KMS key ID for cosign attestation signing")
     push_parser.add_argument("--public-key", default=os.getenv("PUBLIC_KEY"), help="Immutable public verification key for RHTL provenance verification")
     push_parser.add_argument("--rhtl-predicate-type", default=os.getenv("RHTL_PREDICATE_TYPE"), help="Expected in-toto predicate type for RHTL provenance verification")
@@ -119,7 +118,6 @@ def handle_push(args: argparse.Namespace) -> int:
             package=package,
             version=version,
             workspace_dir=Path(args.workspace_dir),
-            allow_overwrite=args.allow_overwrite,
             sign_key=args.sign_key,
             provenance_path=args.provenance_path,
             public_key=args.public_key,
