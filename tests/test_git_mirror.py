@@ -216,6 +216,25 @@ def test_reingesting_same_minor_different_patch_is_refused(tmp_path: Path):
         )
 
 
+def test_unparseable_version_is_refused(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com",
+        group="testgroup",
+        committer_name="bot",
+        committer_email="bot@example.com",
+    )
+
+    # A version that cannot be parsed has no stream to seed; mirroring fails
+    # rather than falling back to a shared branch.
+    source = create_sample_source(tmp_path, "bad-ver", "not-a-version")
+    with pytest.raises(ValueError, match="Cannot parse version"):
+        publisher.publish_source(
+            source_path=source, package="bad-ver", version="not-a-version",
+            workspace_dir=workspace, dry_run=True,
+        )
+
+
 def test_rhtl_pep740_adaptation_preserves_base64_and_rejects_malformed(tmp_path: Path):
     raw = tmp_path / "provenance.pep740.json"
     output = tmp_path / "provenance.dsse.json"
