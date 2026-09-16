@@ -10,7 +10,8 @@ metadata:
 spec:
   description: |-
     Unpacks a source archive, records SLSA Build Provenance metadata (.lightwell/metadata.json),
-    commits, tags <canonical-pkg>/<version>, and pushes to a Git forge with SemVer topology.
+    commits the version as a rootless snapshot on a version-derived stream branch
+    (stream/<major>.<minor>), tags <canonical-pkg>/<version>, and pushes to a Git forge.
   params:
     - name: sourceDataArtifact
       description: Trusted Artifact containing the source archives.
@@ -76,10 +77,6 @@ spec:
       description: Optional explicit full remote Git repository URL.
       type: string
       default: ""
-    - name: allowOverwrite
-      description: Allow overwriting an existing tag with different content.
-      type: string
-      default: "false"
     - name: signingSecretName
       description: Name of secret containing SIGN_KEY, PUBLIC_KEY, and/or cosign credentials (optional).
       type: string
@@ -291,10 +288,6 @@ spec:
 
         if [ -n "$(params.gitRemoteUrl)" ]; then
           ARGS+=("--remote-url=$(params.gitRemoteUrl)")
-        fi
-
-        if [ "$(params.allowOverwrite)" = "true" ]; then
-          ARGS+=("--allow-overwrite")
         fi
 
         if [ -n "$(params.provenancePath)" ]; then
