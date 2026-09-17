@@ -30,6 +30,5 @@ taisce-cuan push \
 
 ### Optional Flags
 - `--sign-key <path|kms-id>`: Path to private key or KMS key URI for signing cosign attestation blobs (`cosign attest-blob`).
-- `--allow-overwrite`: Allow updating an existing tag with different content (fails closed by default).
 - `--remote-url <url>`: Explicit full remote Git repository URL.
 - `--dry-run`: Perform all unpacking, SLSA metadata generation, git commits and tags locally without pushing.
