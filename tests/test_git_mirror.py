@@ -191,31 +191,6 @@ def test_each_version_seeds_a_rootless_stream_branch(tmp_path: Path):
     assert "main" not in branches
 
 
-def test_reingesting_same_minor_different_patch_is_refused(tmp_path: Path):
-    workspace = tmp_path / "workspace"
-    publisher = GitMirrorPublisher(
-        forge_url="https://forge.example.com",
-        group="testgroup",
-        committer_name="bot",
-        committer_email="bot@example.com",
-    )
-
-    source_110 = create_sample_source(tmp_path, "same-minor", "1.1.0")
-    publisher.publish_source(
-        source_path=source_110, package="same-minor", version="1.1.0",
-        workspace_dir=workspace, dry_run=True,
-    )
-
-    # A second patch in the same minor line maps to the existing stream/1.1;
-    # taisce-cuan seeds a stream once and refuses to advance it.
-    source_115 = create_sample_source(tmp_path, "same-minor", "1.1.5")
-    with pytest.raises(ValueError, match="Stream branch stream/1.1 already exists"):
-        publisher.publish_source(
-            source_path=source_115, package="same-minor", version="1.1.5",
-            workspace_dir=workspace, dry_run=True,
-        )
-
-
 def test_unparseable_version_is_refused(tmp_path: Path):
     workspace = tmp_path / "workspace"
     publisher = GitMirrorPublisher(
@@ -482,9 +457,9 @@ def test_git_mirror_publisher_real_bare_remote(tmp_path: Path):
     remote_baseline_100 = subprocess.check_output(
         ["git", "rev-parse", "refs/tags/baseline/1.0.0^{commit}"], cwd=remote_bare, text=True
     ).strip()
-    # - refs/heads/stream/1.0 exists and points to the seeded commit
+    # - refs/heads/stream/1.0.0 exists and points to the seeded commit
     remote_stream_100 = subprocess.check_output(
-        ["git", "rev-parse", "refs/heads/stream/1.0^{commit}"], cwd=remote_bare, text=True
+        ["git", "rev-parse", "refs/heads/stream/1.0.0^{commit}"], cwd=remote_bare, text=True
     ).strip()
 
     assert remote_canonical_100 == remote_baseline_100
@@ -515,7 +490,7 @@ def test_git_mirror_publisher_real_bare_remote(tmp_path: Path):
     # 4b. Advancing remote baseline/<version> (simulating a backport CT)
     # Create a backport commit in bare remote and update baseline/1.0.0 tag to it
     tree_id = subprocess.check_output(
-        ["git", "rev-parse", "refs/heads/stream/1.0^{tree}"], cwd=remote_bare, text=True
+        ["git", "rev-parse", "refs/heads/stream/1.0.0^{tree}"], cwd=remote_bare, text=True
     ).strip()
     backport_commit = subprocess.check_output(
         [
@@ -558,7 +533,7 @@ def test_git_mirror_publisher_real_bare_remote(tmp_path: Path):
     ).strip()
     assert remote_base_after_200 == backport_commit
 
-    # Verify 2.0.0 tags and stream/2.0 in bare remote
+    # Verify 2.0.0 tags and stream/2.0.0 in bare remote
     remote_canonical_200 = subprocess.check_output(
         ["git", "rev-parse", "refs/tags/pkg-remote/2.0.0^{commit}"], cwd=remote_bare, text=True
     ).strip()
@@ -566,7 +541,7 @@ def test_git_mirror_publisher_real_bare_remote(tmp_path: Path):
         ["git", "rev-parse", "refs/tags/baseline/2.0.0^{commit}"], cwd=remote_bare, text=True
     ).strip()
     remote_stream_200 = subprocess.check_output(
-        ["git", "rev-parse", "refs/heads/stream/2.0^{commit}"], cwd=remote_bare, text=True
+        ["git", "rev-parse", "refs/heads/stream/2.0.0^{commit}"], cwd=remote_bare, text=True
     ).strip()
     assert remote_canonical_200 == remote_baseline_200 == remote_stream_200
     assert remote_canonical_200 != remote_canonical_100
@@ -848,4 +823,3 @@ def test_publish_source_rhtl_verification_fail_closed_and_opaque(tmp_path: Path,
     assert (lightwell / "provenance.pep740.json").exists()
     assert (lightwell / "provenance.dsse.json").exists()
     assert not (lightwell / "provenance.dsse").exists()
-

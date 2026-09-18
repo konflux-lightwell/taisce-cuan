@@ -387,8 +387,8 @@ class GitMirrorPublisher:
         """Publish normalized source plus the fixed provenance carrier evidence."""
         canonical = canonicalize_name(package)
         tag_name = f"{canonical}/{version}"
-        target_ver = parse_version_safe(version)
-        if target_ver is None:
+
+        if parse_version_safe(version) is None:
             raise ValueError(f"Cannot parse version {version!r}; refusing to mirror an unparseable version.")
 
         repo_name = f"pypi.org-{canonical}"
@@ -534,12 +534,7 @@ class GitMirrorPublisher:
                 f"Tag {tag_name} already exists with different content; refusing to overwrite an ingested version."
             )
 
-        # Determine the target branch. The branch name is derived solely from
-        # the target version, so a given version always maps to the same stream
-        # regardless of ingestion order:
-        #   stream/{epoch}{major}.{minor}
-        stream_epoch = f"{target_ver.epoch}!" if target_ver.epoch else ""
-        target_branch = f"stream/{stream_epoch}{target_ver.major}.{target_ver.minor}"
+        target_branch = f"stream/{version}"
 
         exists_local = subprocess.run(["git", "rev-parse", "--verify", f"refs/heads/{target_branch}"], cwd=repo_dir, capture_output=True).returncode == 0
         exists_remote = subprocess.run(["git", "rev-parse", "--verify", f"refs/remotes/origin/{target_branch}"], cwd=repo_dir, capture_output=True).returncode == 0
