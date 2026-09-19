@@ -1,0 +1,346 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: push-source-to-lightwell-builds
+  labels:
+    app.kubernetes.io/name: push-source-to-lightwell-builds
+    app.kubernetes.io/version: "0.1"
+    app.kubernetes.io/part-of: lightwell
+spec:
+  description: |-
+    Unpacks a source archive, records SLSA Build Provenance metadata (.lightwell/metadata.json),
+    commits the version as a rootless snapshot on a version-derived stream branch
+    (stream/<major>.<minor>), tags <canonical-pkg>/<version>, and pushes to lightwell-builds.
+  params:
+    - name: sourceDataArtifact
+      description: Trusted Artifact containing the source archives.
+      type: string
+      default: ""
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data is stored.
+      type: string
+      default: /var/workdir
+    - name: filesDir
+      description: The relative path within dataDir where files are located.
+      type: string
+      default: files
+    - name: sourcePath
+      description: Explicit path to the source archive (.tar.gz) on the workspace.
+      type: string
+      default: ""
+    - name: sdistPath
+      description: Legacy alias for sourcePath.
+      type: string
+      default: ""
+    - name: provenancePath
+      description: Explicit path to provenance JSON attestation (optional).
+      type: string
+      default: ""
+    - name: packageName
+      description: Package name (e.g., sniffio). Optional if auto-discovered from source archive.
+      type: string
+      default: ""
+    - name: packageVersion
+      description: Package version (e.g., 1.3.1). Optional if auto-discovered from source archive.
+      type: string
+      default: ""
+    - name: gitForgeUrl
+      description: Git forge base URL.
+      type: string
+      default: ""
+    - name: gitlabUrl
+      description: Legacy alias for gitForgeUrl.
+      type: string
+      default: ""
+    - name: gitGroup
+      description: Git target group or organization.
+      type: string
+      default: ""
+    - name: gitlabGroup
+      description: Legacy alias for gitGroup.
+      type: string
+      default: ""
+    - name: committerName
+      description: Git committer and author name.
+      type: string
+      default: ""
+    - name: committerEmail
+      description: Git committer and author email.
+      type: string
+      default: ""
+    - name: gitRemoteUrl
+      description: Optional explicit full remote Git repository URL.
+      type: string
+      default: ""
+    - name: allowOverwrite
+      description: |-
+        Unused. Accepted for compatibility with callers (e.g. release-service-catalog's
+        calunga-push-to-pulp-lightwell pipeline) still passing it from before the
+        taisce-cuan CLI dropped --allow-overwrite support: a version is ingested
+        exactly once, so there is nothing for this task to forward to the CLI.
+      type: string
+      default: "false"
+    - name: signingSecretName
+      description: Name of secret containing SIGN_KEY, PUBLIC_KEY, and/or cosign credentials (optional).
+      type: string
+      default: konflux-cosign-signing-production
+    - name: rhtlPredicateType
+      description: Expected predicate type for RHTL provenance verification (optional).
+      type: string
+      default: ""
+    - name: gitSecretName
+      description: Name of the basic-auth secret containing Git forge credentials.
+      type: string
+      default: lightwell-builds-git-auth
+    - name: caTrustConfigMapName
+      description: Name of the ConfigMap containing the trusted CA bundle for the Git forge.
+      type: string
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      description: Key in caTrustConfigMapName containing the CA bundle.
+      type: string
+      default: ca-bundle.crt
+    - name: taskGitUrl
+      type: string
+      description: URL to git repo containing stepactions.
+      default: https://github.com/konflux-ci/release-service-catalog.git
+    - name: taskGitRevision
+      type: string
+      description: Revision in taskGitUrl repo.
+      default: production
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: git-secret
+      secret:
+        secretName: $(params.gitSecretName)
+        optional: true
+    - name: signing-secret
+      secret:
+        secretName: $(params.signingSecretName)
+        optional: true
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        optional: true
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+  stepTemplate:
+    securityContext:
+      runAsUser: 1001
+    env:
+      - name: HOME
+        value: /tekton/home
+    volumeMounts:
+      - name: workdir
+        mountPath: /var/workdir
+      - name: git-secret
+        mountPath: "/etc/git-secret"
+        readOnly: true
+      - name: signing-secret
+        mountPath: "/etc/signing-secret"
+        readOnly: true
+      - name: trusted-ca
+        mountPath: "/mnt/trusted-ca"
+        readOnly: true
+  steps:
+    - name: prepare-workdir
+      image: >-
+        quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      computeResources:
+        limits:
+          memory: 32Mi
+          cpu: 10m
+        requests:
+          memory: 32Mi
+          cpu: 10m
+      command:
+        - mkdir
+        - -p
+        - $(params.dataDir)
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+          cpu: 10m
+        requests:
+          memory: 64Mi
+          cpu: 10m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: push-source
+      image: quay.io/light-castle/taisce-cuan:latest
+      computeResources:
+        limits:
+          memory: 256Mi
+          cpu: 200m
+        requests:
+          memory: 128Mi
+          cpu: 50m
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        # Use the tenant-injected trust bundle for both Python's GitLab API
+        # client and git's HTTPS transport. Do not fall back to disabling TLS
+        # verification when the internal GitLab chain is present.
+        if [ -f /mnt/trusted-ca/ca-bundle.crt ]; then
+          export SSL_CERT_FILE=/mnt/trusted-ca/ca-bundle.crt
+          export REQUESTS_CA_BUNDLE=/mnt/trusted-ca/ca-bundle.crt
+          export GIT_SSL_CAINFO=/mnt/trusted-ca/ca-bundle.crt
+        fi
+
+        SOURCE_PATH="$(params.sourcePath)"
+        if [ -z "${SOURCE_PATH}" ]; then
+          SOURCE_PATH="$(params.sdistPath)"
+        fi
+
+        if [ -z "${SOURCE_PATH}" ] && [ -d "$(params.dataDir)/$(params.filesDir)" ]; then
+          if [ -n "$(params.packageName)" ] && [ -n "$(params.packageVersion)" ]; then
+            CANONICAL_PKG=$(python3 -c "import re, sys; print(re.sub(r'[-_.]+', '-', sys.argv[1]).lower())" "$(params.packageName)")
+            # Match exact package and version tarball
+            FOUND_MATCHES=()
+            while IFS= read -r f; do
+              [ -n "$f" ] && FOUND_MATCHES+=("$f")
+            done < <(find "$(params.dataDir)/$(params.filesDir)" -maxdepth 1 \
+              \( -name "${CANONICAL_PKG}-$(params.packageVersion).tar.gz" -o -name "$(params.packageName)-$(params.packageVersion).tar.gz" \
+                 -o -name "${CANONICAL_PKG}-$(params.packageVersion).zip" -o -name "$(params.packageName)-$(params.packageVersion).zip" \
+                 -o -name "${CANONICAL_PKG}-$(params.packageVersion).tar.bz2" -o -name "$(params.packageName)-$(params.packageVersion).tar.bz2" \
+                 -o -name "${CANONICAL_PKG}-$(params.packageVersion).tar.xz" -o -name "$(params.packageName)-$(params.packageVersion).tar.xz" \))
+
+            if [ ${#FOUND_MATCHES[@]} -eq 1 ]; then
+              SOURCE_PATH="${FOUND_MATCHES[0]}"
+            elif [ ${#FOUND_MATCHES[@]} -gt 1 ]; then
+              echo "ERROR: Multiple matching archives found for $(params.packageName)==$(params.packageVersion): ${FOUND_MATCHES[*]}" >&2
+              exit 1
+            fi
+          fi
+
+          if [ -z "${SOURCE_PATH}" ]; then
+            # Auto-discover archives
+            ALL_SDISTS=()
+            while IFS= read -r f; do
+              [ -n "$f" ] && ALL_SDISTS+=("$f")
+            done < <(find "$(params.dataDir)/$(params.filesDir)" -maxdepth 1 \
+              \( -name "*.tar.gz" -o -name "*.tar.bz2" -o -name "*.tar.xz" -o -name "*.zip" \))
+
+            if [ ${#ALL_SDISTS[@]} -eq 1 ]; then
+              SOURCE_PATH="${ALL_SDISTS[0]}"
+            elif [ ${#ALL_SDISTS[@]} -gt 1 ]; then
+              echo "ERROR: Multiple sdist archives found in $(params.dataDir)/$(params.filesDir): ${ALL_SDISTS[*]}. Ambiguous autodiscovery." >&2
+              exit 1
+            else
+              echo "ERROR: Could not locate any sdist archive in $(params.dataDir)/$(params.filesDir)" >&2
+              exit 1
+            fi
+          fi
+        fi
+
+        if [ ! -f "${SOURCE_PATH}" ]; then
+          echo "ERROR: Source archive file does not exist: ${SOURCE_PATH}" >&2
+          exit 1
+        fi
+
+        FORGE_URL="$(params.gitForgeUrl)"
+        if [ -z "${FORGE_URL}" ]; then
+          FORGE_URL="$(params.gitlabUrl)"
+        fi
+
+        GROUP="$(params.gitGroup)"
+        if [ -z "${GROUP}" ]; then
+          GROUP="$(params.gitlabGroup)"
+        fi
+
+        GIT_AUTH_TOKEN=""
+        if [ -f "/etc/git-secret/password" ]; then
+          GIT_AUTH_TOKEN=$(< /etc/git-secret/password)
+        elif [ -f "/etc/git-secret/token" ]; then
+          GIT_AUTH_TOKEN=$(< /etc/git-secret/token)
+        fi
+        export GIT_AUTH_TOKEN
+
+        ARGS=(
+          "--source=${SOURCE_PATH}"
+          "--workspace-dir=$(params.dataDir)/work"
+          "--forge-url=${FORGE_URL}"
+          "--group=${GROUP}"
+          "--committer-name=$(params.committerName)"
+          "--committer-email=$(params.committerEmail)"
+        )
+
+        if [ -n "$(params.packageName)" ]; then
+          ARGS+=("--package=$(params.packageName)")
+        fi
+
+        if [ -n "$(params.packageVersion)" ]; then
+          ARGS+=("--version=$(params.packageVersion)")
+        fi
+
+        if [ -n "$(params.gitRemoteUrl)" ]; then
+          ARGS+=("--remote-url=$(params.gitRemoteUrl)")
+        fi
+
+        if [ -n "$(params.provenancePath)" ]; then
+          ARGS+=("--provenance-path=$(params.provenancePath)")
+        fi
+
+        # Kubernetes mounts each signing Secret key as a file. Export all
+        # environment-shaped keys so cosign can use KMS credentials (for
+        # example AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY) without
+        # copying credentials into command arguments or logs.
+        if [ -d "/etc/signing-secret" ]; then
+          for secret_file in /etc/signing-secret/*; do
+            [ -f "${secret_file}" ] || continue
+            secret_key="$(basename "${secret_file}")"
+            if [[ "${secret_key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+              export "${secret_key}=$(cat "${secret_file}")"
+            fi
+          done
+        fi
+
+        # The provisioned public verification key is Secret data, not a
+        # command-line value. Materialize it as a short-lived file because
+        # cosign --key accepts a file path or key URI.
+        PUBLIC_KEY_FILE=""
+        trap 'rm -f "${PUBLIC_KEY_FILE:-}"' EXIT
+        if [ -n "${PUBLIC_KEY:-}" ]; then
+          PUBLIC_KEY_FILE="$(mktemp)"
+          printf '%s' "${PUBLIC_KEY}" > "${PUBLIC_KEY_FILE}"
+          ARGS+=("--public-key=${PUBLIC_KEY_FILE}")
+        elif [ -f "/etc/signing-secret/public.pem" ]; then
+          ARGS+=("--public-key=/etc/signing-secret/public.pem")
+        elif [ -f "/etc/signing-secret/cosign.pub" ]; then
+          ARGS+=("--public-key=/etc/signing-secret/cosign.pub")
+        fi
+
+        if [ -n "${SIGN_KEY:-}" ]; then
+          ARGS+=("--sign-key=${SIGN_KEY}")
+        elif [ -f "/etc/signing-secret/key.pem" ]; then
+          ARGS+=("--sign-key=/etc/signing-secret/key.pem")
+        elif [ -f "/etc/signing-secret/cosign.key" ]; then
+          ARGS+=("--sign-key=/etc/signing-secret/cosign.key")
+        fi
+
+        if [ -n "$(params.rhtlPredicateType)" ]; then
+          ARGS+=("--rhtl-predicate-type=$(params.rhtlPredicateType)")
+        fi
+
+        taisce-cuan push "${ARGS[@]}"
