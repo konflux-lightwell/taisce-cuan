@@ -182,10 +182,10 @@ spec:
       image: quay.io/light-castle/taisce-cuan:latest
       computeResources:
         limits:
-          memory: 256Mi
-          cpu: 200m
+          memory: 1Gi
+          cpu: 500m
         requests:
-          memory: 128Mi
+          memory: 256Mi
           cpu: 50m
       script: |
         #!/usr/bin/env bash
