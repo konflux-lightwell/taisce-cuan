@@ -21,6 +21,24 @@ dependencies = [
 [project.scripts]
 taisce-cuan = "taisce_cuan.cli:main"
 
+[dependency-groups]
+dev = [
+    "ruff>=0.15.2",
+    "pytest>=8.0"
+]
+
+[tool.ruff]
+target-version = "py311"
+src = ["src"]
+
+[tool.ruff.lint]
+# E  - pycodestyle errors (PEP 8 style violations)
+# F  - Pyflakes (unused imports/variables, undefined names, etc.)
+# I  - isort (import sorting and organization)
+# UP - pyupgrade (modernize syntax for the target Python version)
+# B  - flake8-bugbear (likely bugs and design problems)
+select = ["E", "F", "I", "UP", "B"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/taisce_cuan"]
 
