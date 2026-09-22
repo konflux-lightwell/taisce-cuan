@@ -20,7 +20,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from taisce_cuan.sdist import canonicalize_name, compute_sha256
 from taisce_cuan.source import AcquiredSourceArtifact
@@ -42,26 +42,27 @@ def capture_source_origin(
     download_url: str,
     sha256: str,
     size: int,
-    provenance_url: Optional[str] = None,
-    raw_rhtl_index: Optional[bytes] = None,
-    raw_advertised_provenance: Optional[bytes] = None,
-    last_rhtl_url: Optional[str] = None,
-    last_rhtl_status: Optional[int] = None,
-    last_rhtl_reason: Optional[str] = None,
-    last_advertised_provenance_status: Optional[int] = None,
-    last_advertised_provenance_remote_url: Optional[str] = None,
+    provenance_url: str | None = None,
+    raw_rhtl_index: bytes | None = None,
+    raw_advertised_provenance: bytes | None = None,
+    last_rhtl_url: str | None = None,
+    last_rhtl_status: int | None = None,
+    last_rhtl_reason: str | None = None,
+    last_advertised_provenance_status: int | None = None,
+    last_advertised_provenance_remote_url: str | None = None,
 ) -> AcquiredSourceArtifact:
-    """Validate evidence state, preserve raw evidence files, and write source-origin.json."""
+    """Validate evidence state, preserve raw evidence files, and write
+    source-origin.json."""
     root.mkdir(parents=True, exist_ok=True)
     canonical = canonicalize_name(package)
 
-    rhtl_index_path: Optional[Path] = None
+    rhtl_index_path: Path | None = None
     if raw_rhtl_index is not None:
         rhtl_index_path = root / "rhtl-index.pep691.json"
         rhtl_index_path.write_bytes(raw_rhtl_index)
 
-    pep740_path: Optional[Path] = None
-    prov_sha256: Optional[str] = None
+    pep740_path: Path | None = None
+    prov_sha256: str | None = None
 
     is_rhtl = registry in {"rhtl", "packages.redhat.com"}
     mode = "rhtl" if is_rhtl else "pypi"
@@ -69,7 +70,10 @@ def capture_source_origin(
     if is_rhtl:
         if provenance_url is not None:
             if raw_advertised_provenance is None:
-                raise ProvenanceOriginError("Advertised RHTL provenance URL was provided but raw content is missing")
+                raise ProvenanceOriginError(
+                    "Advertised RHTL provenance URL was provided but raw content "
+                    "is missing"
+                )
             pep740_path = root / "provenance.pep740.json"
             pep740_path.write_bytes(raw_advertised_provenance)
             prov_sha256 = hashlib.sha256(raw_advertised_provenance).hexdigest()
@@ -82,7 +86,7 @@ def capture_source_origin(
         else f"downloads/{canonical}-{version}.tar.gz"
     )
 
-    origin: Dict[str, Any] = {
+    origin: dict[str, Any] = {
         "schema": "https://lightwell.dev/schemas/source-origin/v1",
         "acquired": {
             "registry": registry,
@@ -109,37 +113,57 @@ def capture_source_origin(
 
     if is_rhtl:
         if provenance_url is not None:
-            origin["provenance"].update({
-                "advertised": True,
-                "http_status": last_advertised_provenance_status,
-                "path": "provenance.pep740.json",
-                "reference": "provenance.pep740.json",
-                "remote_url": last_advertised_provenance_remote_url or provenance_url,
-                "sha256": prov_sha256,
+            origin["provenance"].update(
+                {
+                    "advertised": True,
+                    "http_status": last_advertised_provenance_status,
+                    "path": "provenance.pep740.json",
+                    "reference": "provenance.pep740.json",
+                    "remote_url": last_advertised_provenance_remote_url
+                    or provenance_url,
+                    "sha256": prov_sha256,
+                    "status": "advertised",
+                    "url": provenance_url,
+                }
+            )
+            origin["provenance"]["rhtl"] = {
                 "status": "advertised",
-                "url": provenance_url,
-            })
-            origin["provenance"]["rhtl"] = {"status": "advertised", "evidence": evidence}
+                "evidence": evidence,
+            }
         else:
-            origin["provenance"].update({
-                "advertised": False,
-                "path": "rhtl-index.pep691.json",
-                "reference": "rhtl-index.pep691.json",
-                "sha256": None,
+            origin["provenance"].update(
+                {
+                    "advertised": False,
+                    "path": "rhtl-index.pep691.json",
+                    "reference": "rhtl-index.pep691.json",
+                    "sha256": None,
+                    "status": "not-advertised",
+                    "url": None,
+                }
+            )
+            origin["provenance"]["rhtl"] = {
                 "status": "not-advertised",
-                "url": None,
-            })
-            origin["provenance"]["rhtl"] = {"status": "not-advertised", "evidence": evidence}
+                "evidence": evidence,
+            }
     else:
-        origin["provenance"]["rhtl"] = {"status": "not-advertised", "evidence": evidence}
+        origin["provenance"]["rhtl"] = {
+            "status": "not-advertised",
+            "evidence": evidence,
+        }
 
     origin_path = root / "source-origin.json"
-    origin_path.write_text(json.dumps(origin, sort_keys=True, separators=(",", ":")) + "\n")
+    origin_path.write_text(
+        json.dumps(origin, sort_keys=True, separators=(",", ":")) + "\n"
+    )
 
     return AcquiredSourceArtifact(
         root=root,
         sdist=sdist_path,
         source_origin=origin_path,
-        rhtl_index=rhtl_index_path if (rhtl_index_path and rhtl_index_path.is_file()) else None,
-        pep740_provenance=pep740_path if (pep740_path and pep740_path.is_file()) else None,
+        rhtl_index=rhtl_index_path
+        if (rhtl_index_path and rhtl_index_path.is_file())
+        else None,
+        pep740_provenance=pep740_path
+        if (pep740_path and pep740_path.is_file())
+        else None,
     )

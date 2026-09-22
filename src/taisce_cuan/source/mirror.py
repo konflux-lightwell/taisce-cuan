@@ -18,12 +18,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import shutil
 import subprocess
 import urllib.parse
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
 
 import httpx
 from packaging.version import InvalidVersion, Version
@@ -48,19 +46,20 @@ from taisce_cuan.sdist import canonicalize_name, extract_sdist_to_source
 logger = logging.getLogger(__name__)
 
 
-def parse_version_safe(ver_str: str) -> Optional[Version]:
+def parse_version_safe(ver_str: str) -> Version | None:
     try:
         return Version(ver_str)
     except InvalidVersion:
         return None
 
 
-def _is_rhtl_registry(registry: Optional[str]) -> bool:
+def _is_rhtl_registry(registry: str | None) -> bool:
     return (registry or "").strip().lower() in {"rhtl", "packages.redhat.com"}
 
 
 class GitMirrorPublisher:
-    """Manages Git initialization, metadata creation, and pushing to Git forges with SemVer topology."""
+    """Manages Git initialization, metadata creation, and pushing to Git forges
+    with SemVer topology."""
 
     adapt_rhtl_pep740 = staticmethod(adapt_rhtl_pep740)
     extract_pep740_predicate_type = staticmethod(extract_pep740_predicate_type)
@@ -70,11 +69,11 @@ class GitMirrorPublisher:
         self,
         forge_url: str = "https://gitlab.cee.redhat.com",
         group: str = "lightwell/lightwell-builds",
-        auth_token: Optional[str] = None,
+        auth_token: str | None = None,
         username: str = "oauth2",
         committer_name: str = "taisce-cuan bot",
         committer_email: str = "lightwell@redhat.com",
-        remote_url: Optional[str] = None,
+        remote_url: str | None = None,
     ):
         self.forge_url = forge_url.rstrip("/")
         self.group = group.strip("/")
@@ -85,19 +84,23 @@ class GitMirrorPublisher:
         self.explicit_remote_url = remote_url
 
     def ensure_remote_project(self, repo_name: str) -> str:
-        """Ensure the project exists on the remote forge, creating it via API if supported."""
+        """Ensure the project exists on the remote forge, creating it via API if
+        supported."""
         if self.explicit_remote_url:
             return self.explicit_remote_url
 
         if not self.auth_token:
-            logger.info("No auth_token provided for forge API check; using standard repo URL")
+            logger.info(
+                "No auth_token provided for forge API check; using standard repo URL"
+            )
             return f"{self.forge_url}/{self.group}/{repo_name}.git"
 
         is_gitlab = "gitlab" in self.forge_url.lower()
 
         if not is_gitlab:
             logger.warning(
-                f"Forge '{self.forge_url}' is not GitLab. Automatic repo creation via API is not supported. "
+                f"Forge '{self.forge_url}' is not GitLab. Automatic repo creation "
+                f"via API is not supported. "
                 f"Assuming repo exists at {self.forge_url}/{self.group}/{repo_name}.git"
             )
             return f"{self.forge_url}/{self.group}/{repo_name}.git"
@@ -107,13 +110,18 @@ class GitMirrorPublisher:
 
         try:
             with httpx.Client(timeout=15.0, verify=True) as client:
-                resp = client.get(f"{self.forge_url}/api/v4/projects/{encoded_project}", headers=headers)
+                resp = client.get(
+                    f"{self.forge_url}/api/v4/projects/{encoded_project}",
+                    headers=headers,
+                )
                 if resp.status_code == 200:
                     logger.info(f"Forge repository {self.group}/{repo_name} exists")
                     return resp.json()["http_url_to_repo"]
 
                 encoded_group = urllib.parse.quote(self.group, safe="")
-                group_resp = client.get(f"{self.forge_url}/api/v4/groups/{encoded_group}", headers=headers)
+                group_resp = client.get(
+                    f"{self.forge_url}/api/v4/groups/{encoded_group}", headers=headers
+                )
                 if group_resp.status_code == 200:
                     group_id = group_resp.json()["id"]
                     create_payload = {
@@ -123,16 +131,24 @@ class GitMirrorPublisher:
                         "initialize_with_readme": False,
                         "visibility": "internal",
                     }
-                    create_resp = client.post(f"{self.forge_url}/api/v4/projects", headers=headers, json=create_payload)
+                    create_resp = client.post(
+                        f"{self.forge_url}/api/v4/projects",
+                        headers=headers,
+                        json=create_payload,
+                    )
                     if create_resp.status_code == 201:
-                        logger.info(f"Created new forge repository {self.group}/{repo_name}")
+                        logger.info(
+                            f"Created new forge repository {self.group}/{repo_name}"
+                        )
                         return create_resp.json()["http_url_to_repo"]
         except Exception as e:
             logger.warning(f"Could not verify or create forge project via API: {e}")
 
         return f"{self.forge_url}/{self.group}/{repo_name}.git"
 
-    def get_existing_tags(self, repo_dir: Path, canonical: str) -> List[Tuple[Version, str]]:
+    def get_existing_tags(
+        self, repo_dir: Path, canonical: str
+    ) -> list[tuple[Version, str]]:
         """List and parse existing tags matching <canonical>/<version>."""
         res = subprocess.run(
             ["git", "tag", "--list", f"{canonical}/*"],
@@ -141,7 +157,7 @@ class GitMirrorPublisher:
             text=True,
             check=True,
         )
-        tags: List[Tuple[Version, str]] = []
+        tags: list[tuple[Version, str]] = []
         for line in res.stdout.strip().splitlines():
             tag_name = line.strip()
             if not tag_name:
@@ -178,9 +194,9 @@ class GitMirrorPublisher:
         self,
         metadata: IngestionMetadata,
         source_file: Path,
-        sign_key: Optional[str],
+        sign_key: str | None,
         output_provenance_file: Path,
-    ) -> Optional[Path]:
+    ) -> Path | None:
         """Delegate wrapper for CosignAttestationSigner."""
         signer = CosignAttestationSigner()
         return signer.sign(metadata, source_file, sign_key, output_provenance_file)
@@ -193,7 +209,10 @@ class GitMirrorPublisher:
         tag_name = f"{canonical}/{request.version}"
 
         if parse_version_safe(request.version) is None:
-            raise ValueError(f"Cannot parse version {request.version!r}; refusing to mirror an unparseable version.")
+            raise ValueError(
+                f"Cannot parse version {request.version!r}; refusing to mirror an "
+                f"unparseable version."
+            )
 
         repo_name = f"pypi.org-{canonical}"
         repo_dir = request.workspace_dir / repo_name
@@ -229,24 +248,47 @@ class GitMirrorPublisher:
                 effective_pred,
             )
 
-        logger.info(f"Publishing {request.package} {request.version} ({source_sha256}) to {repo_name}")
+        logger.info(
+            f"Publishing {request.package} {request.version} ({source_sha256}) "
+            f"to {repo_name}"
+        )
 
         # 2. Git init if repo not present
         if not (repo_dir / ".git").exists():
-            subprocess.run(["git", "init", "--initial-branch=main"], cwd=repo_dir, check=True, capture_output=True)
-            subprocess.run(["git", "config", "user.name", self.committer_name], cwd=repo_dir, check=True)
-            subprocess.run(["git", "config", "user.email", self.committer_email], cwd=repo_dir, check=True)
+            subprocess.run(
+                ["git", "init", "--initial-branch=main"],
+                cwd=repo_dir,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", self.committer_name],
+                cwd=repo_dir,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.email", self.committer_email],
+                cwd=repo_dir,
+                check=True,
+            )
 
         if self.auth_token:
             if "gitlab" in self.forge_url.lower():
                 import base64
-                basic_auth = base64.b64encode(f"{self.username}:{self.auth_token}".encode()).decode()
+
+                basic_auth = base64.b64encode(
+                    f"{self.username}:{self.auth_token}".encode()
+                ).decode()
                 header = f"Authorization: Basic {basic_auth}"
             else:
                 header = f"Authorization: Bearer {self.auth_token}"
-            subprocess.run(["git", "config", "http.extraHeader", header], cwd=repo_dir, check=True)
+            subprocess.run(
+                ["git", "config", "http.extraHeader", header], cwd=repo_dir, check=True
+            )
 
-        remote_url = self.ensure_remote_project(repo_name) if not request.dry_run else None
+        remote_url = (
+            self.ensure_remote_project(repo_name) if not request.dry_run else None
+        )
 
         if remote_url and not request.dry_run:
             ls_res = subprocess.run(
@@ -257,17 +299,30 @@ class GitMirrorPublisher:
                 check=False,
             )
             if ls_res.returncode != 0:
-                raise RuntimeError(f"Could not access remote repository {remote_url}: {ls_res.stderr.strip()}")
+                raise RuntimeError(
+                    f"Could not access remote repository {remote_url}: "
+                    f"{ls_res.stderr.strip()}"
+                )
 
             fetch_res = subprocess.run(
-                ["git", "fetch", "--force", "--tags", remote_url, "+refs/heads/*:refs/remotes/origin/*"],
+                [
+                    "git",
+                    "fetch",
+                    "--force",
+                    "--tags",
+                    remote_url,
+                    "+refs/heads/*:refs/remotes/origin/*",
+                ],
                 cwd=repo_dir,
                 capture_output=True,
                 text=True,
                 check=False,
             )
             if fetch_res.returncode != 0:
-                logger.info("Remote repository appears empty or has no matching refs; initializing fresh tree")
+                logger.info(
+                    "Remote repository appears empty or has no matching refs; "
+                    "initializing fresh tree"
+                )
 
         # 3. Check existing tags and idempotency / overwrite protection
         existing_tags = self.get_existing_tags(repo_dir, canonical)
@@ -277,7 +332,10 @@ class GitMirrorPublisher:
 
         if tag_name in existing_tag_names:
             if self.check_existing_tag_content(repo_dir, tag_name, source_sha256):
-                logger.info(f"Tag {tag_name} already exists with identical SHA-256 ({source_sha256}). Nothing to do.")
+                logger.info(
+                    f"Tag {tag_name} already exists with identical SHA-256 "
+                    f"({source_sha256}). Nothing to do."
+                )
                 return PublishSourceResult(
                     tag_name=tag_name,
                     repo_name=repo_name,
@@ -287,24 +345,50 @@ class GitMirrorPublisher:
                     disposition="already-present",
                 )
             raise ValueError(
-                f"Tag {tag_name} already exists with different content; refusing to overwrite an ingested version."
+                f"Tag {tag_name} already exists with different content; refusing "
+                f"to overwrite an ingested version."
             )
 
         # 4. Check out the version-derived stream branch, refusing to advance one
         # that already exists during ingestion.
-        exists_local = subprocess.run(["git", "rev-parse", "--verify", f"refs/heads/{target_branch}"], cwd=repo_dir, capture_output=True).returncode == 0
-        exists_remote = subprocess.run(["git", "rev-parse", "--verify", f"refs/remotes/origin/{target_branch}"], cwd=repo_dir, capture_output=True).returncode == 0
+        exists_local = (
+            subprocess.run(
+                ["git", "rev-parse", "--verify", f"refs/heads/{target_branch}"],
+                cwd=repo_dir,
+                capture_output=True,
+            ).returncode
+            == 0
+        )
+        exists_remote = (
+            subprocess.run(
+                [
+                    "git",
+                    "rev-parse",
+                    "--verify",
+                    f"refs/remotes/origin/{target_branch}",
+                ],
+                cwd=repo_dir,
+                capture_output=True,
+            ).returncode
+            == 0
+        )
         if exists_local:
             raise ValueError(
-                f"Stream branch {target_branch} already exists locally; refusing to advance."
+                f"Stream branch {target_branch} already exists locally; refusing "
+                f"to advance."
             )
         elif exists_remote:
             raise ValueError(
-                f"Stream branch {target_branch} already exists; refusing to advance it during ingestion."
+                f"Stream branch {target_branch} already exists; refusing to "
+                f"advance it during ingestion."
             )
 
-        subprocess.run(["git", "checkout", "--orphan", target_branch], cwd=repo_dir, check=True)
-        subprocess.run(["git", "rm", "-rf", "."], cwd=repo_dir, capture_output=True, check=False)
+        subprocess.run(
+            ["git", "checkout", "--orphan", target_branch], cwd=repo_dir, check=True
+        )
+        subprocess.run(
+            ["git", "rm", "-rf", "."], cwd=repo_dir, capture_output=True, check=False
+        )
 
         # 5. Extract source archive
         source_dir = repo_dir / "source"
@@ -329,7 +413,10 @@ class GitMirrorPublisher:
                 shutil.copyfile(raw_pep740, lightwell_dir / "provenance.pep740.json")
                 (lightwell_dir / "rhtl-index.pep691.json").unlink(missing_ok=True)
             else:
-                shutil.copyfile(carrier_root / "rhtl-index.pep691.json", lightwell_dir / "rhtl-index.pep691.json")
+                shutil.copyfile(
+                    carrier_root / "rhtl-index.pep691.json",
+                    lightwell_dir / "rhtl-index.pep691.json",
+                )
                 (lightwell_dir / "provenance.pep740.json").unlink(missing_ok=True)
                 (lightwell_dir / "provenance.dsse.json").unlink(missing_ok=True)
         else:
@@ -348,7 +435,10 @@ class GitMirrorPublisher:
 
         # 8. Stage, commit, tag, and atomic push
         subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
-        commit_msg = f"ingest: {canonical} {request.version} from {verified.registry}\n\nsha256: {source_sha256}"
+        commit_msg = (
+            f"ingest: {canonical} {request.version} from {verified.registry}"
+            f"\n\nsha256: {source_sha256}"
+        )
         subprocess.run(["git", "commit", "-m", commit_msg], cwd=repo_dir, check=True)
 
         subprocess.run(["git", "tag", tag_name], cwd=repo_dir, check=True)
@@ -356,7 +446,10 @@ class GitMirrorPublisher:
 
         baseline_tag = f"baseline/{request.version}"
         existing_baseline = subprocess.run(
-            ["git", "tag", "--list", baseline_tag], cwd=repo_dir, capture_output=True, text=True
+            ["git", "tag", "--list", baseline_tag],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
         ).stdout.strip()
 
         tags_to_push = [tag_name]
@@ -379,12 +472,23 @@ class GitMirrorPublisher:
         push_cmd = ["git", "push", "--atomic", remote_url, target_branch, *tags_to_push]
 
         try:
-            subprocess.run(push_cmd, cwd=repo_dir, check=True, capture_output=True, text=True)
+            subprocess.run(
+                push_cmd, cwd=repo_dir, check=True, capture_output=True, text=True
+            )
         except subprocess.CalledProcessError as e:
-            sanitized_err = e.stderr.replace(self.auth_token, "********") if self.auth_token else e.stderr
-            raise RuntimeError(f"Failed to push branch {target_branch} and tag {tag_name}: {sanitized_err}") from None
+            sanitized_err = (
+                e.stderr.replace(self.auth_token, "********")
+                if self.auth_token
+                else e.stderr
+            )
+            raise RuntimeError(
+                f"Failed to push branch {target_branch} and tag {tag_name}: "
+                f"{sanitized_err}"
+            ) from None
 
-        logger.info(f"Pushed {repo_name} branch {target_branch} and tag {tag_name} to remote")
+        logger.info(
+            f"Pushed {repo_name} branch {target_branch} and tag {tag_name} to remote"
+        )
         return PublishSourceResult(
             tag_name=tag_name,
             repo_name=repo_name,
@@ -400,13 +504,13 @@ class GitMirrorPublisher:
         package: str,
         version: str,
         workspace_dir: Path,
-        upstream_pypi_url: Optional[str] = None,
-        upstream_pypi_sha256: Optional[str] = None,
+        upstream_pypi_url: str | None = None,
+        upstream_pypi_sha256: str | None = None,
         source_registry: str = "pypi.org",
-        sign_key: Optional[str] = None,
-        provenance_path: Optional[Path] = None,
-        public_key: Optional[str] = None,
-        rhtl_predicate_type: Optional[str] = None,
+        sign_key: str | None = None,
+        provenance_path: Path | None = None,
+        public_key: str | None = None,
+        rhtl_predicate_type: str | None = None,
         dry_run: bool = False,
     ) -> str:
         """Compatibility adapter for publish_source -> returns result.tag_name."""
@@ -431,13 +535,13 @@ class GitMirrorPublisher:
         package: str,
         version: str,
         workspace_dir: Path,
-        upstream_pypi_url: Optional[str] = None,
-        upstream_pypi_sha256: Optional[str] = None,
+        upstream_pypi_url: str | None = None,
+        upstream_pypi_sha256: str | None = None,
         source_registry: str = "pypi.org",
-        sign_key: Optional[str] = None,
-        provenance_path: Optional[Path] = None,
-        public_key: Optional[str] = None,
-        rhtl_predicate_type: Optional[str] = None,
+        sign_key: str | None = None,
+        provenance_path: Path | None = None,
+        public_key: str | None = None,
+        rhtl_predicate_type: str | None = None,
         dry_run: bool = False,
     ) -> str:
         """Compatibility adapter for publish_sdist -> returns result.tag_name."""

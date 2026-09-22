@@ -1,6 +1,8 @@
 import tarfile
-import pytest
 from pathlib import Path
+
+import pytest
+
 from taisce_cuan.sdist import canonicalize_name, compute_sha256, extract_sdist_to_source
 
 
@@ -12,16 +14,20 @@ def test_canonicalize_name():
 
 def test_fetcher_registries_parsing(tmp_path: Path):
     from taisce_cuan.source import SdistSourceFetcher
+
     fetcher = SdistSourceFetcher()
     try:
-        fetcher.fetch("non-existent-pkg-xyz", "0.0.1", tmp_path, registries="rhtl,pypi.org")
-        assert False, "Should have raised RuntimeError"
+        fetcher.fetch(
+            "non-existent-pkg-xyz", "0.0.1", tmp_path, registries="rhtl,pypi.org"
+        )
+        raise AssertionError("Should have raised RuntimeError")
     except RuntimeError as e:
         assert "could not be resolved" in str(e)
 
 
 def test_fetcher_unrecognized_registry_raises(tmp_path: Path):
     from taisce_cuan.source import SdistSourceFetcher
+
     fetcher = SdistSourceFetcher()
     with pytest.raises(ValueError, match="Unrecognized registry 'unknown-registry'"):
         fetcher.fetch("requests", "2.31.0", tmp_path, registries="unknown-registry")
@@ -30,11 +36,10 @@ def test_fetcher_unrecognized_registry_raises(tmp_path: Path):
         fetcher.fetch("requests", "2.31.0", tmp_path, registries=["rhtl", "foobar"])
 
 
-
 def test_extract_sdist_and_sha256(tmp_path: Path):
     sdist_file = tmp_path / "testpkg-1.0.0.tar.gz"
     source_dir = tmp_path / "source"
-    
+
     # Create dummy sdist
     pkg_dir = tmp_path / "testpkg-1.0.0"
     pkg_dir.mkdir()
@@ -56,11 +61,12 @@ def test_extract_sdist_and_sha256(tmp_path: Path):
 def test_extract_sdist_path_traversal_rejection(tmp_path: Path):
     evil_sdist = tmp_path / "evil-1.0.0.tar.gz"
     source_dir = tmp_path / "source"
-    
+
     with tarfile.open(evil_sdist, "w:gz") as tar:
         info = tarfile.TarInfo(name="../evil.txt")
         data = b"malicious content"
         import io
+
         info.size = len(data)
         tar.addfile(info, io.BytesIO(data))
 
@@ -70,6 +76,7 @@ def test_extract_sdist_path_traversal_rejection(tmp_path: Path):
 
 def test_extract_zip_sdist_and_zip_slip_prevention(tmp_path: Path):
     import zipfile
+
     source_dir = tmp_path / "source"
 
     # 1. Test safe zip extraction
@@ -94,6 +101,7 @@ def test_extract_zip_sdist_and_zip_slip_prevention(tmp_path: Path):
 
 def test_fetcher_missing_sha256_fail_closed(tmp_path: Path):
     from taisce_cuan.source import SdistSourceFetcher, SdistSourceInfo
+
     fetcher = SdistSourceFetcher()
     # Mock query_rhtl returning entry with empty sha256
     fetcher.query_rhtl = lambda pkg, ver: SdistSourceInfo(
@@ -110,10 +118,13 @@ def test_fetcher_missing_sha256_fail_closed(tmp_path: Path):
 
 def test_inspect_sdist_metadata_tarball(tmp_path: Path):
     from taisce_cuan.sdist import inspect_sdist_metadata
+
     sdist_file = tmp_path / "my-cool-package-2.4.1.tar.gz"
     pkg_dir = tmp_path / "my-cool-package-2.4.1"
     pkg_dir.mkdir()
-    (pkg_dir / "PKG-INFO").write_text("Metadata-Version: 2.1\nName: my-cool-package\nVersion: 2.4.1\n")
+    (pkg_dir / "PKG-INFO").write_text(
+        "Metadata-Version: 2.1\nName: my-cool-package\nVersion: 2.4.1\n"
+    )
     with tarfile.open(sdist_file, "w:gz") as tar:
         tar.add(pkg_dir, arcname="my-cool-package-2.4.1")
 
@@ -124,10 +135,15 @@ def test_inspect_sdist_metadata_tarball(tmp_path: Path):
 
 def test_inspect_sdist_metadata_zip(tmp_path: Path):
     import zipfile
+
     from taisce_cuan.sdist import inspect_sdist_metadata
+
     zip_sdist = tmp_path / "zip-pkg-3.1.4.zip"
     with zipfile.ZipFile(zip_sdist, "w") as zf:
-        zf.writestr("zip-pkg-3.1.4/PKG-INFO", "Metadata-Version: 2.1\nName: zip-pkg\nVersion: 3.1.4\n")
+        zf.writestr(
+            "zip-pkg-3.1.4/PKG-INFO",
+            "Metadata-Version: 2.1\nName: zip-pkg\nVersion: 3.1.4\n",
+        )
 
     pkg, ver = inspect_sdist_metadata(zip_sdist)
     assert pkg == "zip-pkg"
@@ -136,6 +152,7 @@ def test_inspect_sdist_metadata_zip(tmp_path: Path):
 
 def test_inspect_sdist_metadata_fallback_filename(tmp_path: Path):
     from taisce_cuan.sdist import inspect_sdist_metadata
+
     sdist_file = tmp_path / "fallback_pkg-0.10.2b1.tar.gz"
     pkg_dir = tmp_path / "other-dir"
     pkg_dir.mkdir()
@@ -148,8 +165,9 @@ def test_inspect_sdist_metadata_fallback_filename(tmp_path: Path):
 
 
 def test_fetcher_resets_per_fetch_state(tmp_path: Path):
-    from taisce_cuan.source import SdistSourceFetcher
     import httpx
+
+    from taisce_cuan.source import SdistSourceFetcher
 
     def handler(request: httpx.Request):
         if "pypi.org" in str(request.url):
@@ -182,5 +200,3 @@ def test_fetcher_resets_per_fetch_state(tmp_path: Path):
     assert fetcher.last_rhtl_index is None
     assert fetcher.last_advertised_provenance is None
     assert not (tmp_path / "rhtl-index.pep691.json").exists()
-
-

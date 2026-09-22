@@ -17,10 +17,11 @@ limitations under the License.
 from __future__ import annotations
 
 import datetime
-from pathlib import Path
 import shutil
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
+
 import pytest
 
 from taisce_cuan.provenance.attest import (
@@ -81,7 +82,7 @@ def make_dummy_verified(
 
 def test_build_ingestion_metadata_single_subject_no_git_tree(tmp_path: Path):
     verified = make_dummy_verified(tmp_path, "pkg-sample", "1.0.0")
-    fixed_time = datetime.datetime(2026, 9, 11, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    fixed_time = datetime.datetime(2026, 9, 11, 12, 0, 0, tzinfo=datetime.UTC)
 
     metadata = build_ingestion_metadata(
         verified,
@@ -106,7 +107,12 @@ def test_cosign_attestation_signer_fail_closed_missing_key(tmp_path: Path):
 
     # Missing file path fails closed
     with pytest.raises(ValueError, match="does not exist or is not a file"):
-        signer.sign(metadata, verified.artifact.sdist, "/non/existent/key.pem", tmp_path / "out.dsse")
+        signer.sign(
+            metadata,
+            verified.artifact.sdist,
+            "/non/existent/key.pem",
+            tmp_path / "out.dsse",
+        )
 
 
 def test_cosign_attestation_signer_missing_cosign_binary(tmp_path: Path):
@@ -118,16 +124,22 @@ def test_cosign_attestation_signer_missing_cosign_binary(tmp_path: Path):
     metadata = build_ingestion_metadata(verified, "repo")
 
     with pytest.raises(RuntimeError, match="cosign' CLI binary is not installed"):
-        signer.sign(metadata, verified.artifact.sdist, str(key_file), tmp_path / "out.dsse")
+        signer.sign(
+            metadata, verified.artifact.sdist, str(key_file), tmp_path / "out.dsse"
+        )
 
 
-def test_cosign_attestation_signer_mocked_invocation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_cosign_attestation_signer_mocked_invocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     key_file = tmp_path / "key.pem"
     key_file.write_text("dummy key")
     out_file = tmp_path / "metadata.dsse.json"
 
     captured: list[list[str]] = []
-    monkeypatch.setattr("taisce_cuan.provenance.attest.shutil.which", lambda _: "/bin/cosign")
+    monkeypatch.setattr(
+        "taisce_cuan.provenance.attest.shutil.which", lambda _: "/bin/cosign"
+    )
 
     def fake_run(command, **kwargs):
         captured.append(command)
@@ -149,8 +161,12 @@ def test_cosign_attestation_signer_mocked_invocation(tmp_path: Path, monkeypatch
     assert any(arg.startswith("--predicate=") for arg in captured[0])
 
 
-@pytest.mark.skipif(not shutil.which("cosign"), reason="cosign CLI binary is not installed")
-def test_cosign_signing_success_and_temp_predicate_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.skipif(
+    not shutil.which("cosign"), reason="cosign CLI binary is not installed"
+)
+def test_cosign_signing_success_and_temp_predicate_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     monkeypatch.setenv("COSIGN_PASSWORD", "")
     # Generate test key pair
     key_prefix = tmp_path / "cosign_test"
@@ -176,8 +192,12 @@ def test_cosign_signing_success_and_temp_predicate_cleanup(tmp_path: Path, monke
     assert not list(tmp_path.glob("*-predicate.json"))
 
 
-@pytest.mark.skipif(not shutil.which("cosign"), reason="cosign CLI binary is not installed")
-def test_attest_source_mirror_pypi_vs_rhtl(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.skipif(
+    not shutil.which("cosign"), reason="cosign CLI binary is not installed"
+)
+def test_attest_source_mirror_pypi_vs_rhtl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     monkeypatch.setenv("COSIGN_PASSWORD", "")
     key_prefix = tmp_path / "cosign_key"
     subprocess.run(
@@ -188,7 +208,9 @@ def test_attest_source_mirror_pypi_vs_rhtl(tmp_path: Path, monkeypatch: pytest.M
     key_path = str(tmp_path / "cosign_key.key")
 
     # 1. PyPI signs both metadata.dsse.json and provenance.dsse.json
-    pypi_verified = make_dummy_verified(tmp_path, "pkg-pypi", "1.0.0", route=SourceRoute.PYPI)
+    pypi_verified = make_dummy_verified(
+        tmp_path, "pkg-pypi", "1.0.0", route=SourceRoute.PYPI
+    )
     pypi_repo = tmp_path / "repo_pypi"
     attest_source_mirror(pypi_verified, pypi_repo, "repo-pypi", sign_key=key_path)
 
@@ -198,7 +220,9 @@ def test_attest_source_mirror_pypi_vs_rhtl(tmp_path: Path, monkeypatch: pytest.M
     assert (lightwell_pypi / "provenance.dsse.json").exists()
 
     # 2. RHTL signs metadata.dsse.json only; NEVER provenance.dsse.json
-    rhtl_verified = make_dummy_verified(tmp_path, "pkg-rhtl", "1.0.0", route=SourceRoute.RHTL)
+    rhtl_verified = make_dummy_verified(
+        tmp_path, "pkg-rhtl", "1.0.0", route=SourceRoute.RHTL
+    )
     rhtl_repo = tmp_path / "repo_rhtl"
     attest_source_mirror(rhtl_verified, rhtl_repo, "repo-rhtl", sign_key=key_path)
 

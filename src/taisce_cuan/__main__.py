@@ -17,6 +17,7 @@ limitations under the License.
 from __future__ import annotations
 
 import sys
+
 from taisce_cuan.cli import main
 
 if __name__ == "__main__":

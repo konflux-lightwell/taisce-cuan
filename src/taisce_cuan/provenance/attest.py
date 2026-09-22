@@ -24,7 +24,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Literal, Optional
+from typing import Any, Literal
 
 from taisce_cuan.models import (
     BuildDefinition,
@@ -59,10 +59,10 @@ class PublishSourceRequest:
     version: str
     workspace_dir: Path
     source_registry: str = "pypi.org"
-    sign_key: Optional[str] = None
-    provenance_path: Optional[Path] = None
-    public_key: Optional[str] = None
-    rhtl_predicate_type: Optional[str] = None
+    sign_key: str | None = None
+    provenance_path: Path | None = None
+    public_key: str | None = None
+    rhtl_predicate_type: str | None = None
     dry_run: bool = False
 
 
@@ -82,10 +82,10 @@ def build_ingestion_metadata(
     verified: VerifiedSourceArtifact,
     repo_name: str,
     *,
-    repo_dir: Optional[Path] = None,
-    sign_key: Optional[str] = None,
+    repo_dir: Path | None = None,
+    sign_key: str | None = None,
     dry_run: bool = False,
-    timestamp: Optional[datetime.datetime] = None,
+    timestamp: datetime.datetime | None = None,
 ) -> IngestionMetadata:
     """
     Build IngestionMetadata from a verified source artifact.
@@ -94,7 +94,7 @@ def build_ingestion_metadata(
     Binds the complete local mirror closure members in resolvedDependencies.
     """
     canonical = canonicalize_name(verified.package)
-    now = timestamp or datetime.datetime.now(datetime.timezone.utc)
+    now = timestamp or datetime.datetime.now(datetime.UTC)
     now_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     # Sole published subject is the normalized sdist archive
@@ -112,12 +112,18 @@ def build_ingestion_metadata(
     original_archive = final_downloads / verified.artifact.acquired.sdist.name
     normalized_archive = lightwell_dir / verified.artifact.sdist.name
 
-    resolved_deps: List[ResolvedDependency] = []
+    resolved_deps: list[ResolvedDependency] = []
 
-    def bind(path: Path, role: str, name: Optional[str] = None, **annotations: Any) -> None:
+    def bind(
+        path: Path, role: str, name: str | None = None, **annotations: Any
+    ) -> None:
         if not path.exists():
             return
-        relative = path.relative_to(repo_dir).as_posix() if path.is_relative_to(repo_dir) else path.name
+        relative = (
+            path.relative_to(repo_dir).as_posix()
+            if path.is_relative_to(repo_dir)
+            else path.name
+        )
         resolved_deps.append(
             ResolvedDependency(
                 name=name or relative,
@@ -147,7 +153,9 @@ def build_ingestion_metadata(
     if sign_key:
         note = "Signed Lightwell metadata attestation."
     elif dry_run:
-        note = "Unsigned SLSA Build Provenance inventory (dry-run; no release fallback)."
+        note = (
+            "Unsigned SLSA Build Provenance inventory (dry-run; no release fallback)."
+        )
     else:
         note = "Unsigned SLSA Build Provenance inventory."
 
@@ -182,9 +190,12 @@ def build_ingestion_metadata(
 
 
 class CosignAttestationSigner:
-    """Concrete Cosign attestation signer. Validates key form, runs attest-blob, fails closed."""
+    """Concrete Cosign attestation signer.
 
-    def __init__(self, cosign_bin: Optional[str] = None):
+    Validates key form, runs attest-blob, fails closed.
+    """
+
+    def __init__(self, cosign_bin: str | None = None):
         self.cosign_bin = cosign_bin or shutil.which("cosign")
 
     def _validate_key(self, sign_key: str) -> None:
@@ -194,20 +205,28 @@ class CosignAttestationSigner:
 
         is_kms = any(
             key_str.startswith(prefix)
-            for prefix in ["awskms://", "k8s://", "gcpkms://", "azurekms://", "vault://"]
+            for prefix in [
+                "awskms://",
+                "k8s://",
+                "gcpkms://",
+                "azurekms://",
+                "vault://",
+            ]
         )
         if not is_kms:
             key_path = Path(key_str)
             if not key_path.exists() or not key_path.is_file():
-                raise ValueError(f"Signing key file '{key_str}' does not exist or is not a file.")
+                raise ValueError(
+                    f"Signing key file '{key_str}' does not exist or is not a file."
+                )
 
     def sign(
         self,
         metadata: IngestionMetadata,
         source_file: Path,
-        sign_key: Optional[str],
+        sign_key: str | None,
         output_provenance_file: Path,
-    ) -> Optional[Path]:
+    ) -> Path | None:
         key_str = (sign_key or "").strip()
         if not key_str:
             logger.debug("No sign_key provided to CosignAttestationSigner; skipping")
@@ -216,12 +235,18 @@ class CosignAttestationSigner:
         self._validate_key(key_str)
 
         if not self.cosign_bin or not shutil.which(self.cosign_bin):
-            raise RuntimeError("Signing key provided but 'cosign' CLI binary is not installed in PATH.")
+            raise RuntimeError(
+                "Signing key provided but 'cosign' CLI binary is not installed in PATH."
+            )
 
         output_provenance_file.parent.mkdir(parents=True, exist_ok=True)
 
-        with tempfile.NamedTemporaryFile("w", suffix="-predicate.json", delete=False) as pred_tmp:
-            pred_tmp.write(metadata.predicate.model_dump_json(by_alias=True, exclude_none=True))
+        with tempfile.NamedTemporaryFile(
+            "w", suffix="-predicate.json", delete=False
+        ) as pred_tmp:
+            pred_tmp.write(
+                metadata.predicate.model_dump_json(by_alias=True, exclude_none=True)
+            )
             pred_tmp_path = pred_tmp.name
 
         try:
@@ -242,7 +267,9 @@ class CosignAttestationSigner:
                     f"cosign attest-blob failed (exit {res.returncode}): {res.stderr}"
                 )
 
-            logger.info(f"Successfully created signed attestation ({output_provenance_file})")
+            logger.info(
+                f"Successfully created signed attestation ({output_provenance_file})"
+            )
             return output_provenance_file
         finally:
             if os.path.exists(pred_tmp_path):
@@ -254,20 +281,24 @@ def attest_source_mirror(
     repo_dir: Path,
     repo_name: str,
     *,
-    sign_key: Optional[str] = None,
-    public_key: Optional[str] = None,
-    signer: Optional[CosignAttestationSigner] = None,
+    sign_key: str | None = None,
+    public_key: str | None = None,
+    signer: CosignAttestationSigner | None = None,
     dry_run: bool = False,
-    timestamp: Optional[datetime.datetime] = None,
+    timestamp: datetime.datetime | None = None,
 ) -> IngestionMetadata:
     """
-    Build metadata, write .lightwell/metadata.json, and sign required outputs according to route.
+    Build metadata, write .lightwell/metadata.json, and sign required outputs
+    according to route.
     PyPI: signs metadata.dsse.json and provenance.dsse.json
-    RHTL: signs metadata.dsse.json only (provenance.dsse.json is adapted from raw PEP 740)
+    RHTL: signs metadata.dsse.json only (provenance.dsse.json is adapted from raw
+    PEP 740)
     All signed envelopes use the .dsse.json extension.
     Legacy .dsse files are unlinked.
     """
-    lightwell_dir = repo_dir if repo_dir.name == ".lightwell" else (repo_dir / ".lightwell")
+    lightwell_dir = (
+        repo_dir if repo_dir.name == ".lightwell" else (repo_dir / ".lightwell")
+    )
     lightwell_dir.mkdir(parents=True, exist_ok=True)
 
     metadata = build_ingestion_metadata(
@@ -296,13 +327,18 @@ def attest_source_mirror(
             output_provenance_file=lightwell_dir / "metadata.dsse.json",
         )
         if metadata_attestation is None:
-            raise RuntimeError("metadata signing is required when a signing key is configured")
+            raise RuntimeError(
+                "metadata signing is required when a signing key is configured"
+            )
 
-        # Self-verify the newly signed metadata attestation if a public verification key is available
+        # Self-verify the newly signed metadata attestation if a public
+        # verification key is available
         verification_key = None
         if public_key:
             verification_key = public_key
-        elif sign_key.startswith(("awskms://", "k8s://", "gcpkms://", "azurekms://", "vault://")):
+        elif sign_key.startswith(
+            ("awskms://", "k8s://", "gcpkms://", "azurekms://", "vault://")
+        ):
             verification_key = sign_key
         else:
             candidate_pub = Path(sign_key).with_suffix(".pub")

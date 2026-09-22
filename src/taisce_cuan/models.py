@@ -17,30 +17,38 @@ limitations under the License.
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
 def get_builder_id() -> str:
-    """Resolve builder ID pinned to commit ref or container image digest if available."""
-    # 1. Explicit builder ID / image digest env var (injected in container build or Tekton step)
+    """Resolve builder ID pinned to commit ref or container image digest if
+    available."""
+    # 1. Explicit builder ID / image digest env var (injected in container build
+    #    or Tekton step)
     builder_id = os.getenv("TAISCE_CUAN_BUILDER_ID")
     if builder_id and builder_id.strip():
         return builder_id.strip()
 
     # 2. Git commit SHA injected at build time
-    commit_sha = os.getenv("GIT_COMMIT_SHA") or os.getenv("GITHUB_SHA") or os.getenv("CI_COMMIT_SHA")
+    commit_sha = (
+        os.getenv("GIT_COMMIT_SHA")
+        or os.getenv("GITHUB_SHA")
+        or os.getenv("CI_COMMIT_SHA")
+    )
     if commit_sha and commit_sha.strip():
         return f"https://github.com/konflux-lightwell/taisce-cuan@{commit_sha.strip()}"
 
     # 3. Fallback to package version tag
     from taisce_cuan import __version__
+
     return f"https://github.com/konflux-lightwell/taisce-cuan@v{__version__}"
 
 
 class Subject(BaseModel):
     name: str
-    digest: Dict[str, str]
+    digest: dict[str, str]
 
 
 class ExternalParameters(BaseModel):
@@ -53,14 +61,14 @@ class ExternalParameters(BaseModel):
 class ResolvedDependency(BaseModel):
     name: str
     uri: str
-    digest: Dict[str, str]
-    annotations: Optional[Dict[str, Any]] = None
+    digest: dict[str, str]
+    annotations: dict[str, Any] | None = None
 
 
 class BuildDefinition(BaseModel):
     buildType: str = "https://lightwell.dev/buildTypes/python-source-ingest/v1"
     externalParameters: ExternalParameters
-    resolvedDependencies: List[ResolvedDependency] = Field(default_factory=list)
+    resolvedDependencies: list[ResolvedDependency] = Field(default_factory=list)
 
 
 class Completeness(BaseModel):
@@ -75,7 +83,7 @@ class LightwellBuildsInfo(BaseModel):
 
 
 class FromagerInfo(BaseModel):
-    build_extra: List[str] = Field(default_factory=list)
+    build_extra: list[str] = Field(default_factory=list)
 
 
 class RunDetailsMetadata(BaseModel):
@@ -86,9 +94,10 @@ class RunDetailsMetadata(BaseModel):
     attestation_level: str = "unsigned-inventory"
     note: str = (
         "Unsigned SLSA Build Provenance inventory. "
-        "Signed attestation produced by Tekton Chains / Cosign when this ingestion runs as part of Konflux."
+        "Signed attestation produced by Tekton Chains / Cosign when this "
+        "ingestion runs as part of Konflux."
     )
-    lightwell_builds: Optional[LightwellBuildsInfo] = None
+    lightwell_builds: LightwellBuildsInfo | None = None
     fromager: FromagerInfo = Field(default_factory=FromagerInfo)
 
 
@@ -111,5 +120,5 @@ class IngestionMetadata(BaseModel):
 
     type_: str = Field("https://in-toto.io/Statement/v0.1", alias="_type")
     predicateType: str = "https://slsa.dev/provenance/v1"
-    subject: List[Subject]
+    subject: list[Subject]
     predicate: Predicate

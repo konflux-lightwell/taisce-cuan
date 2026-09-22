@@ -1,12 +1,12 @@
 import json
-from pathlib import Path
 import shutil
 import subprocess
 import tarfile
+from pathlib import Path
 from types import SimpleNamespace
+
 import pytest
 
-from taisce_cuan.source import GitMirrorPublisher
 from taisce_cuan.models import (
     BuildDefinition,
     Builder,
@@ -17,9 +17,12 @@ from taisce_cuan.models import (
     RunDetailsMetadata,
     Subject,
 )
+from taisce_cuan.source import GitMirrorPublisher
 
 
-def create_sample_source(path: Path, pkg_name: str, version: str, filename: str = "", extra_content: str = "") -> Path:
+def create_sample_source(
+    path: Path, pkg_name: str, version: str, filename: str = "", extra_content: str = ""
+) -> Path:
     """Create a normalized sdist with its required provenance carrier evidence."""
     fn = filename or f"{pkg_name}-{version}.tar.gz"
     carrier_root = path / f"carrier_{pkg_name}_{version}_{extra_content or 'default'}"
@@ -27,30 +30,52 @@ def create_sample_source(path: Path, pkg_name: str, version: str, filename: str 
     source_file = carrier_root / fn
     pkg_dir = carrier_root / f"src_{fn}"
     pkg_dir.mkdir(parents=True, exist_ok=True)
-    (pkg_dir / "pyproject.toml").write_text(f"[project]\nname='{pkg_name}'\nversion='{version}'\n# {extra_content}")
+    (pkg_dir / "pyproject.toml").write_text(
+        f"[project]\nname='{pkg_name}'\nversion='{version}'\n# {extra_content}"
+    )
     with tarfile.open(source_file, "w:gz") as tar:
         tar.add(pkg_dir, arcname=f"{pkg_name}-{version}")
 
     import hashlib
+
     source_sha256 = hashlib.sha256(source_file.read_bytes()).hexdigest()
     downloads = carrier_root / "downloads"
     downloads.mkdir()
     original = downloads / fn
     original.write_bytes(source_file.read_bytes())
     original_sha256 = hashlib.sha256(original.read_bytes()).hexdigest()
-    (carrier_root / "source-origin.json").write_text(json.dumps({
-        "schema": "https://lightwell.dev/schemas/source-origin/v1",
-        "acquired": {"registry": "pypi.org", "sha256": original_sha256, "path": f"downloads/{fn}",
-                     "package": pkg_name, "version": version},
-        "provenance": {"mode": "pypi", "rhtl": {"status": "not-advertised"}},
-    }, sort_keys=True) + "\n")
-    (carrier_root / "sdist-transformation.json").write_text(json.dumps({
-        "schema": "https://lightwell.dev/schemas/sdist-transformation/v1",
-        "input": {"sha256": original_sha256},
-        "output": {"sha256": source_sha256, "path": fn},
-        "source_origin_sha256": hashlib.sha256((carrier_root / "source-origin.json").read_bytes()).hexdigest(),
-        "transformation": "normalized-sdist",
-    }, sort_keys=True) + "\n")
+    (carrier_root / "source-origin.json").write_text(
+        json.dumps(
+            {
+                "schema": "https://lightwell.dev/schemas/source-origin/v1",
+                "acquired": {
+                    "registry": "pypi.org",
+                    "sha256": original_sha256,
+                    "path": f"downloads/{fn}",
+                    "package": pkg_name,
+                    "version": version,
+                },
+                "provenance": {"mode": "pypi", "rhtl": {"status": "not-advertised"}},
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    (carrier_root / "sdist-transformation.json").write_text(
+        json.dumps(
+            {
+                "schema": "https://lightwell.dev/schemas/sdist-transformation/v1",
+                "input": {"sha256": original_sha256},
+                "output": {"sha256": source_sha256, "path": fn},
+                "source_origin_sha256": hashlib.sha256(
+                    (carrier_root / "source-origin.json").read_bytes()
+                ).hexdigest(),
+                "transformation": "normalized-sdist",
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
     return source_file
 
 
@@ -78,19 +103,33 @@ def test_git_mirror_publisher_dry_run(tmp_path: Path):
     assert (repo_dir / ".lightwell" / "metadata.json").exists()
 
     # Verify both canonical tag and baseline tag were created pointing to same commit
-    canonical_commit = subprocess.check_output(["git", "rev-parse", "sample/0.1.0^{commit}"], cwd=repo_dir, text=True).strip()
-    baseline_commit = subprocess.check_output(["git", "rev-parse", "baseline/0.1.0^{commit}"], cwd=repo_dir, text=True).strip()
+    canonical_commit = subprocess.check_output(
+        ["git", "rev-parse", "sample/0.1.0^{commit}"], cwd=repo_dir, text=True
+    ).strip()
+    baseline_commit = subprocess.check_output(
+        ["git", "rev-parse", "baseline/0.1.0^{commit}"], cwd=repo_dir, text=True
+    ).strip()
     assert canonical_commit == baseline_commit
 
     meta = json.loads((repo_dir / ".lightwell" / "metadata.json").read_text())
-    assert meta["predicate"]["buildDefinition"]["buildType"] == "https://lightwell.dev/buildTypes/python-source-ingest/v1"
-    assert meta["predicate"]["buildDefinition"]["externalParameters"]["canonical_name"] == "sample"
+    assert (
+        meta["predicate"]["buildDefinition"]["buildType"]
+        == "https://lightwell.dev/buildTypes/python-source-ingest/v1"
+    )
+    assert (
+        meta["predicate"]["buildDefinition"]["externalParameters"]["canonical_name"]
+        == "sample"
+    )
     assert len(meta["subject"]) == 1
     assert "gitTree" not in meta["subject"][0]["digest"]
 
     # Verify custom git committer config
-    user_name = subprocess.check_output(["git", "config", "user.name"], cwd=repo_dir, text=True).strip()
-    user_email = subprocess.check_output(["git", "config", "user.email"], cwd=repo_dir, text=True).strip()
+    user_name = subprocess.check_output(
+        ["git", "config", "user.name"], cwd=repo_dir, text=True
+    ).strip()
+    user_email = subprocess.check_output(
+        ["git", "config", "user.email"], cwd=repo_dir, text=True
+    ).strip()
     assert user_name == "custom bot"
     assert user_email == "custom@example.com"
 
@@ -126,8 +165,20 @@ def test_idempotent_push_same_content(tmp_path: Path):
 
 
 def test_overwrite_protection_different_content(tmp_path: Path):
-    source1 = create_sample_source(tmp_path, "pkg-test", "1.0.0", filename="pkg-test-1.0.0-v1.tar.gz", extra_content="v1")
-    source2 = create_sample_source(tmp_path, "pkg-test", "1.0.0", filename="pkg-test-1.0.0-v2.tar.gz", extra_content="v2_modified")
+    source1 = create_sample_source(
+        tmp_path,
+        "pkg-test",
+        "1.0.0",
+        filename="pkg-test-1.0.0-v1.tar.gz",
+        extra_content="v1",
+    )
+    source2 = create_sample_source(
+        tmp_path,
+        "pkg-test",
+        "1.0.0",
+        filename="pkg-test-1.0.0-v2.tar.gz",
+        extra_content="v2_modified",
+    )
     workspace = tmp_path / "workspace"
     publisher = GitMirrorPublisher(
         forge_url="https://forge.example.com",
@@ -166,13 +217,19 @@ def test_each_version_seeds_a_rootless_stream_branch(tmp_path: Path):
     repo_dir = workspace / "pypi.org-multi-ver"
 
     def parent_count(ref: str) -> int:
-        out = subprocess.check_output(["git", "rev-list", "--parents", "-n", "1", ref], cwd=repo_dir, text=True)
+        out = subprocess.check_output(
+            ["git", "rev-list", "--parents", "-n", "1", ref], cwd=repo_dir, text=True
+        )
         return len(out.strip().split()) - 1
 
     # Each version maps to stream/{major}.{minor} derived purely from its version,
     # committed as a rootless (0-parent) orphan regardless of ingestion order.
-    for version, stream in [("1.0.0", "stream/1.0"), ("2.0.0", "stream/2.0"),
-                            ("1.1.0", "stream/1.1"), ("0.9.0", "stream/0.9")]:
+    for version, stream in [
+        ("1.0.0", "stream/1.0"),
+        ("2.0.0", "stream/2.0"),
+        ("1.1.0", "stream/1.1"),
+        ("0.9.0", "stream/0.9"),
+    ]:
         source = create_sample_source(tmp_path, "multi-ver", version)
         publisher.publish_source(
             source_path=source,
@@ -181,13 +238,17 @@ def test_each_version_seeds_a_rootless_stream_branch(tmp_path: Path):
             workspace_dir=workspace,
             dry_run=True,
         )
-        branches = subprocess.check_output(["git", "branch", "--list"], cwd=repo_dir, text=True)
+        branches = subprocess.check_output(
+            ["git", "branch", "--list"], cwd=repo_dir, text=True
+        )
         assert stream in branches
         # The canonical tag is a rootless commit; no fabricated cross-version lineage.
         assert parent_count(f"multi-ver/{version}") == 0
 
     # No "main" branch is ever created; branches are one-per-minor-line.
-    branches = subprocess.check_output(["git", "branch", "--list"], cwd=repo_dir, text=True)
+    branches = subprocess.check_output(
+        ["git", "branch", "--list"], cwd=repo_dir, text=True
+    )
     assert "main" not in branches
 
 
@@ -205,8 +266,11 @@ def test_unparseable_version_is_refused(tmp_path: Path):
     source = create_sample_source(tmp_path, "bad-ver", "not-a-version")
     with pytest.raises(ValueError, match="Cannot parse version"):
         publisher.publish_source(
-            source_path=source, package="bad-ver", version="not-a-version",
-            workspace_dir=workspace, dry_run=True,
+            source_path=source,
+            package="bad-ver",
+            version="not-a-version",
+            workspace_dir=workspace,
+            dry_run=True,
         )
 
 
@@ -232,7 +296,9 @@ def test_sign_attestation_fail_closed(tmp_path: Path):
             ),
             runDetails=RunDetails(
                 builder=Builder(),
-                metadata=RunDetailsMetadata(startedOn="2026-09-02T00:00:00Z", finishedOn="2026-09-02T00:00:00Z"),
+                metadata=RunDetailsMetadata(
+                    startedOn="2026-09-02T00:00:00Z", finishedOn="2026-09-02T00:00:00Z"
+                ),
             ),
         ),
     )
@@ -246,7 +312,9 @@ def test_sign_attestation_fail_closed(tmp_path: Path):
 
     # When sign_key is a non-existent file path -> fails closed with ValueError
     with pytest.raises(ValueError, match="does not exist"):
-        publisher.sign_attestation(metadata, source_file, "/non/existent/key.pem", out_prov)
+        publisher.sign_attestation(
+            metadata, source_file, "/non/existent/key.pem", out_prov
+        )
 
 
 def test_sign_attestation_uses_configured_cosign_policy(monkeypatch, tmp_path: Path):
@@ -261,7 +329,9 @@ def test_sign_attestation_uses_configured_cosign_policy(monkeypatch, tmp_path: P
         committer_email="test@example.com",
     )
     metadata = IngestionMetadata(
-        subject=[Subject(name="cosign-policy-1.0.0.tar.gz", digest={"sha256": "0" * 64})],
+        subject=[
+            Subject(name="cosign-policy-1.0.0.tar.gz", digest={"sha256": "0" * 64})
+        ],
         predicate=Predicate(
             buildDefinition=BuildDefinition(
                 externalParameters=ExternalParameters(
@@ -281,7 +351,10 @@ def test_sign_attestation_uses_configured_cosign_policy(monkeypatch, tmp_path: P
     )
     captured: list[str] = []
 
-    monkeypatch.setattr("taisce_cuan.provenance.attest.shutil.which", lambda name: "/usr/local/bin/cosign")
+    monkeypatch.setattr(
+        "taisce_cuan.provenance.attest.shutil.which",
+        lambda name: "/usr/local/bin/cosign",
+    )
 
     def fake_run(command, **_kwargs):
         captured.extend(command)
@@ -290,11 +363,17 @@ def test_sign_attestation_uses_configured_cosign_policy(monkeypatch, tmp_path: P
 
     monkeypatch.setattr("taisce_cuan.provenance.attest.subprocess.run", fake_run)
 
-    assert publisher.sign_attestation(metadata, source_file, str(key_file), output_file) == output_file
+    assert (
+        publisher.sign_attestation(metadata, source_file, str(key_file), output_file)
+        == output_file
+    )
     assert "--tlog-upload=false" not in captured
     assert any(arg.startswith("--type=") for arg in captured)
     assert f"--key={key_file}" in captured
-    assert any(arg.startswith("--output-file=") or arg.startswith("--bundle=") for arg in captured)
+    assert any(
+        arg.startswith("--output-file=") or arg.startswith("--bundle=")
+        for arg in captured
+    )
 
 
 def test_baseline_tag_preserved_on_idempotent_reingest(tmp_path: Path):
@@ -317,18 +396,29 @@ def test_baseline_tag_preserved_on_idempotent_reingest(tmp_path: Path):
     )
 
     repo_dir = workspace / "pypi.org-pkg-base"
-    init_commit = subprocess.check_output(["git", "rev-parse", "pkg-base/1.0.0^{commit}"], cwd=repo_dir, text=True).strip()
-    init_base = subprocess.check_output(["git", "rev-parse", "baseline/1.0.0^{commit}"], cwd=repo_dir, text=True).strip()
+    init_commit = subprocess.check_output(
+        ["git", "rev-parse", "pkg-base/1.0.0^{commit}"], cwd=repo_dir, text=True
+    ).strip()
+    init_base = subprocess.check_output(
+        ["git", "rev-parse", "baseline/1.0.0^{commit}"], cwd=repo_dir, text=True
+    ).strip()
     assert init_commit == init_base
 
     # Simulate a backport advancing baseline/1.0.0 to a new commit
     (repo_dir / "source" / "patch.txt").write_text("backport patch")
     subprocess.run(["git", "add", "source/patch.txt"], cwd=repo_dir, check=True)
     subprocess.run(["git", "commit", "-m", "backport commit"], cwd=repo_dir, check=True)
-    backport_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo_dir, text=True).strip()
-    subprocess.run(["git", "tag", "-f", "baseline/1.0.0", backport_commit], cwd=repo_dir, check=True)
+    backport_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repo_dir, text=True
+    ).strip()
+    subprocess.run(
+        ["git", "tag", "-f", "baseline/1.0.0", backport_commit],
+        cwd=repo_dir,
+        check=True,
+    )
 
-    # Re-ingesting the same version (idempotent no-op) must preserve the advanced baseline tag
+    # Re-ingesting the same version (idempotent no-op) must preserve the advanced
+    # baseline tag
     publisher.publish_source(
         source_path=source_file,
         package="pkg-base",
@@ -336,7 +426,9 @@ def test_baseline_tag_preserved_on_idempotent_reingest(tmp_path: Path):
         workspace_dir=workspace,
         dry_run=True,
     )
-    current_base = subprocess.check_output(["git", "rev-parse", "baseline/1.0.0^{commit}"], cwd=repo_dir, text=True).strip()
+    current_base = subprocess.check_output(
+        ["git", "rev-parse", "baseline/1.0.0^{commit}"], cwd=repo_dir, text=True
+    ).strip()
     assert current_base == backport_commit
 
 
@@ -355,7 +447,8 @@ def test_git_mirror_publisher_real_bare_remote(tmp_path: Path):
         remote_url=remote_url,
     )
 
-    # 2. Test GitMirrorPublisher.publish_source with dry_run=False pointing to bare remote
+    # 2. Test GitMirrorPublisher.publish_source with dry_run=False pointing to
+    #    bare remote
     source_100 = create_sample_source(tmp_path, "pkg-remote", "1.0.0")
     tag_100 = publisher.publish_source(
         source_path=source_100,
@@ -367,23 +460,32 @@ def test_git_mirror_publisher_real_bare_remote(tmp_path: Path):
     assert tag_100 == "pkg-remote/1.0.0"
 
     # 3. Verify atomic push in the bare remote
-    # - refs/tags/<canonical>/<version> exists in the bare remote and points to right commit
+    # - refs/tags/<canonical>/<version> exists in the bare remote and points to
+    #   right commit
     remote_canonical_100 = subprocess.check_output(
-        ["git", "rev-parse", "refs/tags/pkg-remote/1.0.0^{commit}"], cwd=remote_bare, text=True
+        ["git", "rev-parse", "refs/tags/pkg-remote/1.0.0^{commit}"],
+        cwd=remote_bare,
+        text=True,
     ).strip()
-    # - refs/tags/baseline/<version> exists in the bare remote and points to initial commit
+    # - refs/tags/baseline/<version> exists in the bare remote and points to
+    #   initial commit
     remote_baseline_100 = subprocess.check_output(
-        ["git", "rev-parse", "refs/tags/baseline/1.0.0^{commit}"], cwd=remote_bare, text=True
+        ["git", "rev-parse", "refs/tags/baseline/1.0.0^{commit}"],
+        cwd=remote_bare,
+        text=True,
     ).strip()
     # - refs/heads/stream/1.0.0 exists and points to the seeded commit
     remote_stream_100 = subprocess.check_output(
-        ["git", "rev-parse", "refs/heads/stream/1.0.0^{commit}"], cwd=remote_bare, text=True
+        ["git", "rev-parse", "refs/heads/stream/1.0.0^{commit}"],
+        cwd=remote_bare,
+        text=True,
     ).strip()
 
     assert remote_canonical_100 == remote_baseline_100
     assert remote_canonical_100 == remote_stream_100
 
-    # 4. Verify remote tag synchronization and overwrite protection over real git remote:
+    # 4. Verify remote tag synchronization and overwrite protection over real git
+    #    remote:
     # 4a. Re-running with same content is a no-op / succeeds
     tag_noop = publisher.publish_source(
         source_path=source_100,
@@ -408,7 +510,9 @@ def test_git_mirror_publisher_real_bare_remote(tmp_path: Path):
     # 4b. Advancing remote baseline/<version> (simulating a backport CT)
     # Create a backport commit in bare remote and update baseline/1.0.0 tag to it
     tree_id = subprocess.check_output(
-        ["git", "rev-parse", "refs/heads/stream/1.0.0^{tree}"], cwd=remote_bare, text=True
+        ["git", "rev-parse", "refs/heads/stream/1.0.0^{tree}"],
+        cwd=remote_bare,
+        text=True,
     ).strip()
     backport_commit = subprocess.check_output(
         [
@@ -427,10 +531,16 @@ def test_git_mirror_publisher_real_bare_remote(tmp_path: Path):
         cwd=remote_bare,
         text=True,
     ).strip()
-    subprocess.run(["git", "update-ref", "refs/tags/baseline/1.0.0", backport_commit], cwd=remote_bare, check=True)
+    subprocess.run(
+        ["git", "update-ref", "refs/tags/baseline/1.0.0", backport_commit],
+        cwd=remote_bare,
+        check=True,
+    )
 
     verified_advanced_base = subprocess.check_output(
-        ["git", "rev-parse", "refs/tags/baseline/1.0.0^{commit}"], cwd=remote_bare, text=True
+        ["git", "rev-parse", "refs/tags/baseline/1.0.0^{commit}"],
+        cwd=remote_bare,
+        text=True,
     ).strip()
     assert verified_advanced_base == backport_commit
 
@@ -447,26 +557,39 @@ def test_git_mirror_publisher_real_bare_remote(tmp_path: Path):
 
     # Verify baseline/1.0.0 is still the advanced backport commit in the bare remote
     remote_base_after_200 = subprocess.check_output(
-        ["git", "rev-parse", "refs/tags/baseline/1.0.0^{commit}"], cwd=remote_bare, text=True
+        ["git", "rev-parse", "refs/tags/baseline/1.0.0^{commit}"],
+        cwd=remote_bare,
+        text=True,
     ).strip()
     assert remote_base_after_200 == backport_commit
 
     # Verify 2.0.0 tags and stream/2.0.0 in bare remote
     remote_canonical_200 = subprocess.check_output(
-        ["git", "rev-parse", "refs/tags/pkg-remote/2.0.0^{commit}"], cwd=remote_bare, text=True
+        ["git", "rev-parse", "refs/tags/pkg-remote/2.0.0^{commit}"],
+        cwd=remote_bare,
+        text=True,
     ).strip()
     remote_baseline_200 = subprocess.check_output(
-        ["git", "rev-parse", "refs/tags/baseline/2.0.0^{commit}"], cwd=remote_bare, text=True
+        ["git", "rev-parse", "refs/tags/baseline/2.0.0^{commit}"],
+        cwd=remote_bare,
+        text=True,
     ).strip()
     remote_stream_200 = subprocess.check_output(
-        ["git", "rev-parse", "refs/heads/stream/2.0.0^{commit}"], cwd=remote_bare, text=True
+        ["git", "rev-parse", "refs/heads/stream/2.0.0^{commit}"],
+        cwd=remote_bare,
+        text=True,
     ).strip()
     assert remote_canonical_200 == remote_baseline_200 == remote_stream_200
     assert remote_canonical_200 != remote_canonical_100
 
-    # 4c. Re-ingesting an existing version with different content is refused over the real remote
+    # 4c. Re-ingesting an existing version with different content is refused over
+    #     the real remote
     source_100_modified = create_sample_source(
-        tmp_path, "pkg-remote", "1.0.0", filename="pkg-remote-1.0.0-mod.tar.gz", extra_content="force-overwrite"
+        tmp_path,
+        "pkg-remote",
+        "1.0.0",
+        filename="pkg-remote-1.0.0-mod.tar.gz",
+        extra_content="force-overwrite",
     )
     with pytest.raises(ValueError, match="refusing to overwrite an ingested version"):
         publisher.publish_source(
@@ -479,7 +602,9 @@ def test_git_mirror_publisher_real_bare_remote(tmp_path: Path):
 
     # The original tags in the bare remote remain untouched
     remote_canonical_100_after = subprocess.check_output(
-        ["git", "rev-parse", "refs/tags/pkg-remote/1.0.0^{commit}"], cwd=remote_bare, text=True
+        ["git", "rev-parse", "refs/tags/pkg-remote/1.0.0^{commit}"],
+        cwd=remote_bare,
+        text=True,
     ).strip()
     assert remote_canonical_100_after == remote_canonical_100
 
@@ -511,7 +636,9 @@ def test_provenance_carrier_is_published_with_normalized_sdist(tmp_path: Path):
         assert published.read_text() == (carrier_root / evidence_name).read_text()
 
     origin = json.loads((repo_dir / ".lightwell" / "source-origin.json").read_text())
-    transformation = json.loads((repo_dir / ".lightwell" / "sdist-transformation.json").read_text())
+    transformation = json.loads(
+        (repo_dir / ".lightwell" / "sdist-transformation.json").read_text()
+    )
     assert origin["acquired"]["registry"] == "pypi.org"
     assert transformation["input"]["sha256"] == origin["acquired"]["sha256"]
     assert transformation["output"]["sha256"] == origin["acquired"]["sha256"]
@@ -529,12 +656,17 @@ def create_rhtl_sample_source(
     import hashlib
 
     fn = f"{pkg_name}-{version}.tar.gz"
-    carrier_root = path / f"carrier_rhtl_{pkg_name}_{version}_{advertised}_{extra_content or 'default'}"
+    carrier_root = (
+        path
+        / f"carrier_rhtl_{pkg_name}_{version}_{advertised}_{extra_content or 'default'}"
+    )
     carrier_root.mkdir(parents=True, exist_ok=True)
     source_file = carrier_root / fn
     pkg_dir = carrier_root / f"src_{fn}"
     pkg_dir.mkdir(parents=True, exist_ok=True)
-    (pkg_dir / "pyproject.toml").write_text(f"[project]\nname='{pkg_name}'\nversion='{version}'\n# {extra_content}")
+    (pkg_dir / "pyproject.toml").write_text(
+        f"[project]\nname='{pkg_name}'\nversion='{version}'\n# {extra_content}"
+    )
     with tarfile.open(source_file, "w:gz") as tar:
         tar.add(pkg_dir, arcname=f"{pkg_name}-{version}")
 
@@ -545,7 +677,13 @@ def create_rhtl_sample_source(
     original.write_bytes(source_file.read_bytes())
     original_sha256 = hashlib.sha256(original.read_bytes()).hexdigest()
 
-    pep691_content = b'{"files":[{"filename":"' + fn.encode() + b'","hashes":{"sha256":"' + original_sha256.encode() + b'"}}]}'
+    pep691_content = (
+        b'{"files":[{"filename":"'
+        + fn.encode()
+        + b'","hashes":{"sha256":"'
+        + original_sha256.encode()
+        + b'"}}]}'
+    )
     pep691_file = carrier_root / "rhtl-index.pep691.json"
     pep691_file.write_bytes(pep691_content)
     pep691_sha256 = hashlib.sha256(pep691_content).hexdigest()
@@ -596,19 +734,31 @@ def create_rhtl_sample_source(
     origin_file = carrier_root / "source-origin.json"
     origin_file.write_text(json.dumps(origin_data, sort_keys=True) + "\n")
 
-    (carrier_root / "sdist-transformation.json").write_text(json.dumps({
-        "schema": "https://lightwell.dev/schemas/sdist-transformation/v1",
-        "input": {"sha256": original_sha256},
-        "output": {"sha256": source_sha256, "path": fn},
-        "source_origin_sha256": hashlib.sha256(origin_file.read_bytes()).hexdigest(),
-        "transformation": "normalized-sdist",
-    }, sort_keys=True) + "\n")
+    (carrier_root / "sdist-transformation.json").write_text(
+        json.dumps(
+            {
+                "schema": "https://lightwell.dev/schemas/sdist-transformation/v1",
+                "input": {"sha256": original_sha256},
+                "output": {"sha256": source_sha256, "path": fn},
+                "source_origin_sha256": hashlib.sha256(
+                    origin_file.read_bytes()
+                ).hexdigest(),
+                "transformation": "normalized-sdist",
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
     return source_file
 
 
 def test_rhtl_advertised_exact_evidence_and_no_native_dsse(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(GitMirrorPublisher, "verify_blob_attestation", staticmethod(lambda *args: None))
-    source_file = create_rhtl_sample_source(tmp_path, "rhtl-advertised", "1.0.0", advertised=True)
+    monkeypatch.setattr(
+        GitMirrorPublisher, "verify_blob_attestation", staticmethod(lambda *args: None)
+    )
+    source_file = create_rhtl_sample_source(
+        tmp_path, "rhtl-advertised", "1.0.0", advertised=True
+    )
     carrier_root = source_file.parent
     workspace = tmp_path / "workspace"
     publisher = GitMirrorPublisher(
@@ -631,7 +781,9 @@ def test_rhtl_advertised_exact_evidence_and_no_native_dsse(tmp_path: Path, monke
     lightwell_dir = repo_dir / ".lightwell"
 
     # Raw PEP 740 is preserved and adapted DSSE is created
-    assert (lightwell_dir / "provenance.pep740.json").read_bytes() == (carrier_root / "provenance.pep740.json").read_bytes()
+    assert (lightwell_dir / "provenance.pep740.json").read_bytes() == (
+        carrier_root / "provenance.pep740.json"
+    ).read_bytes()
     assert (lightwell_dir / "provenance.dsse.json").exists()
 
     # RHTL route never emits provenance.dsse
@@ -641,7 +793,9 @@ def test_rhtl_advertised_exact_evidence_and_no_native_dsse(tmp_path: Path, monke
 
 
 def test_rhtl_not_advertised_exact_evidence_and_no_pep740(tmp_path: Path):
-    source_file = create_rhtl_sample_source(tmp_path, "rhtl-unadvertised", "1.0.0", advertised=False)
+    source_file = create_rhtl_sample_source(
+        tmp_path, "rhtl-unadvertised", "1.0.0", advertised=False
+    )
     carrier_root = source_file.parent
     workspace = tmp_path / "workspace"
     publisher = GitMirrorPublisher(
@@ -664,7 +818,9 @@ def test_rhtl_not_advertised_exact_evidence_and_no_pep740(tmp_path: Path):
     lightwell_dir = repo_dir / ".lightwell"
 
     # PEP 691 index evidence is preserved byte-for-byte
-    assert (lightwell_dir / "rhtl-index.pep691.json").read_bytes() == (carrier_root / "rhtl-index.pep691.json").read_bytes()
+    assert (lightwell_dir / "rhtl-index.pep691.json").read_bytes() == (
+        carrier_root / "rhtl-index.pep691.json"
+    ).read_bytes()
     # PEP 740 provenance was not advertised, so it must not exist
     assert not (lightwell_dir / "provenance.pep740.json").exists()
     # RHTL never emits provenance.dsse
@@ -672,12 +828,16 @@ def test_rhtl_not_advertised_exact_evidence_and_no_pep740(tmp_path: Path):
     assert not (lightwell_dir / "provenance.dsse.json").exists()
 
 
-@pytest.mark.skipif(not shutil.which("cosign"), reason="cosign CLI binary is not installed")
+@pytest.mark.skipif(
+    not shutil.which("cosign"), reason="cosign CLI binary is not installed"
+)
 def test_cosign_signing_pypi_vs_rhtl(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(GitMirrorPublisher, "verify_blob_attestation", staticmethod(lambda *args: None))
+    monkeypatch.setattr(
+        GitMirrorPublisher, "verify_blob_attestation", staticmethod(lambda *args: None)
+    )
     # Generate disposable cosign test key
     key_file = tmp_path / "cosign.key"
-    pub_file = tmp_path / "cosign.pub"
+    tmp_path / "cosign.pub"
     env = {**subprocess.os.environ, "COSIGN_PASSWORD": ""}
     subprocess.run(
         ["cosign", "generate-key-pair", f"--output-key-prefix={tmp_path / 'cosign'}"],
@@ -711,7 +871,9 @@ def test_cosign_signing_pypi_vs_rhtl(tmp_path: Path, monkeypatch):
     assert not (pypi_lightwell / "provenance.dsse.json").exists()
 
     # 2. RHTL route without signing: no dsse files, opaque PEP 740 preserved and adapted
-    rhtl_source = create_rhtl_sample_source(tmp_path, "sign-rhtl", "1.0.0", advertised=True)
+    rhtl_source = create_rhtl_sample_source(
+        tmp_path, "sign-rhtl", "1.0.0", advertised=True
+    )
     publisher.publish_source(
         source_path=rhtl_source,
         package="sign-rhtl",
@@ -727,7 +889,9 @@ def test_cosign_signing_pypi_vs_rhtl(tmp_path: Path, monkeypatch):
     assert (rhtl_lightwell / "provenance.pep740.json").exists()
 
 
-def test_publish_source_signing_and_legacy_unlinking_mocked(tmp_path: Path, monkeypatch):
+def test_publish_source_signing_and_legacy_unlinking_mocked(
+    tmp_path: Path, monkeypatch
+):
     source_file = create_sample_source(tmp_path, "signed-pkg", "1.0.0")
     workspace = tmp_path / "workspace"
     repo_dir = workspace / "pypi.org-signed-pkg"
@@ -744,8 +908,12 @@ def test_publish_source_signing_and_legacy_unlinking_mocked(tmp_path: Path, monk
     pub_file = tmp_path / "signing.pub"
     pub_file.write_text("public key bytes")
 
-    monkeypatch.setattr("taisce_cuan.provenance.attest.shutil.which", lambda _: "/bin/cosign")
-    monkeypatch.setattr("taisce_cuan.provenance.verify.shutil.which", lambda _: "/bin/cosign")
+    monkeypatch.setattr(
+        "taisce_cuan.provenance.attest.shutil.which", lambda _: "/bin/cosign"
+    )
+    monkeypatch.setattr(
+        "taisce_cuan.provenance.verify.shutil.which", lambda _: "/bin/cosign"
+    )
 
     verify_calls = []
     real_run = subprocess.run
@@ -754,7 +922,11 @@ def test_publish_source_signing_and_legacy_unlinking_mocked(tmp_path: Path, monk
         if command[0] != "/bin/cosign":
             return real_run(command, **kwargs)
         if command[1] == "attest-blob":
-            out_arg = [arg for arg in command if arg.startswith("--output-file=") or arg.startswith("--bundle=")][0]
+            out_arg = [
+                arg
+                for arg in command
+                if arg.startswith("--output-file=") or arg.startswith("--bundle=")
+            ][0]
             out_path = Path(out_arg.split("=", 1)[1])
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text('{"payloadType":"application/vnd.in-toto+json"}\n')
@@ -797,45 +969,91 @@ def test_publish_source_signing_and_legacy_unlinking_mocked(tmp_path: Path, monk
     assert verify_calls[0][key_idx + 1] == str(pub_file)
 
 
-def test_rhtl_metadata_binds_validated_closure_and_registry(tmp_path: Path, monkeypatch):
+def test_rhtl_metadata_binds_validated_closure_and_registry(
+    tmp_path: Path, monkeypatch
+):
     source_file = create_sample_source(tmp_path, "rhtl-pkg", "1.0.0")
     carrier = source_file.parent
     origin_path = carrier / "source-origin.json"
     origin = json.loads(origin_path.read_text())
     origin["acquired"]["registry"] = "rhtl"
-    origin["provenance"] = {"mode": "rhtl", "advertised": True,
-                             "sha256": "placeholder", "rhtl": {"status": "advertised"}}
+    origin["provenance"] = {
+        "mode": "rhtl",
+        "advertised": True,
+        "sha256": "placeholder",
+        "rhtl": {"status": "advertised"},
+    }
     raw = carrier / "provenance.pep740.json"
-    raw.write_text(json.dumps({"attestation_bundles": [{"attestations": [{"envelope": {
-        "statement": "cGF5bG9hZA==", "signature": "c2ln"}}]}]}))
+    raw.write_text(
+        json.dumps(
+            {
+                "attestation_bundles": [
+                    {
+                        "attestations": [
+                            {
+                                "envelope": {
+                                    "statement": "cGF5bG9hZA==",
+                                    "signature": "c2ln",
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        )
+    )
     import hashlib
+
     origin["provenance"]["sha256"] = hashlib.sha256(raw.read_bytes()).hexdigest()
     origin_path.write_text(json.dumps(origin, sort_keys=True) + "\n")
     transformation_path = carrier / "sdist-transformation.json"
     transformation = json.loads(transformation_path.read_text())
-    transformation["source_origin_sha256"] = hashlib.sha256(origin_path.read_bytes()).hexdigest()
+    transformation["source_origin_sha256"] = hashlib.sha256(
+        origin_path.read_bytes()
+    ).hexdigest()
     transformation_path.write_text(json.dumps(transformation, sort_keys=True) + "\n")
-    monkeypatch.setattr(GitMirrorPublisher, "verify_blob_attestation", staticmethod(lambda *args: None))
+    monkeypatch.setattr(
+        GitMirrorPublisher, "verify_blob_attestation", staticmethod(lambda *args: None)
+    )
 
     workspace = tmp_path / "workspace"
-    GitMirrorPublisher(forge_url="https://forge.example.com", group="testgroup").publish_source(
-        source_path=source_file, package="rhtl-pkg", version="1.0.0",
-        workspace_dir=workspace, source_registry="pypi.org", dry_run=True)
+    GitMirrorPublisher(
+        forge_url="https://forge.example.com", group="testgroup"
+    ).publish_source(
+        source_path=source_file,
+        package="rhtl-pkg",
+        version="1.0.0",
+        workspace_dir=workspace,
+        source_registry="pypi.org",
+        dry_run=True,
+    )
     # Repository naming remains compatible with the existing mirror layout.
     repo = workspace / "pypi.org-rhtl-pkg"
     meta = json.loads((repo / ".lightwell" / "metadata.json").read_text())
     build = meta["predicate"]["buildDefinition"]
     assert build["externalParameters"]["upstream_registry"] == "rhtl"
     deps = {item["annotations"]["role"]: item for item in build["resolvedDependencies"]}
-    assert {"lightwell-source-origin", "lightwell-sdist-transformation",
-            "upstream-acquired-sdist", "lightwell-normalized-sdist",
-            "upstream-rhtl-pep740", "adapted-rhtl-dsse"} <= deps.keys()
+    assert {
+        "lightwell-source-origin",
+        "lightwell-sdist-transformation",
+        "upstream-acquired-sdist",
+        "lightwell-normalized-sdist",
+        "upstream-rhtl-pep740",
+        "adapted-rhtl-dsse",
+    } <= deps.keys()
     assert all(item["digest"].get("sha256") for item in deps.values())
-    assert not any("pypi" in item["name"].lower() for item in build["resolvedDependencies"])
-    assert meta["predicate"]["runDetails"]["metadata"]["attestation_level"] == "unsigned-inventory"
+    assert not any(
+        "pypi" in item["name"].lower() for item in build["resolvedDependencies"]
+    )
+    assert (
+        meta["predicate"]["runDetails"]["metadata"]["attestation_level"]
+        == "unsigned-inventory"
+    )
 
 
-def test_publish_source_rhtl_verification_fail_closed_and_opaque(tmp_path: Path, monkeypatch):
+def test_publish_source_rhtl_verification_fail_closed_and_opaque(
+    tmp_path: Path, monkeypatch
+):
     source_file = create_sample_source(tmp_path, "rhtl-gate-pkg", "2.0.0")
     carrier = source_file.parent
     origin_path = carrier / "source-origin.json"
@@ -843,9 +1061,26 @@ def test_publish_source_rhtl_verification_fail_closed_and_opaque(tmp_path: Path,
     origin["acquired"]["registry"] = "rhtl"
     origin["provenance"] = {"mode": "rhtl", "advertised": True, "sha256": "placeholder"}
     raw = carrier / "provenance.pep740.json"
-    raw.write_text(json.dumps({"attestation_bundles": [{"attestations": [{"envelope": {
-        "statement": "cGF5bG9hZA==", "signature": "c2ln"}}]}]}))
+    raw.write_text(
+        json.dumps(
+            {
+                "attestation_bundles": [
+                    {
+                        "attestations": [
+                            {
+                                "envelope": {
+                                    "statement": "cGF5bG9hZA==",
+                                    "signature": "c2ln",
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        )
+    )
     import hashlib
+
     origin["provenance"]["sha256"] = hashlib.sha256(raw.read_bytes()).hexdigest()
     origin_path.write_text(json.dumps(origin, sort_keys=True) + "\n")
     trans_path = carrier / "sdist-transformation.json"
@@ -857,32 +1092,49 @@ def test_publish_source_rhtl_verification_fail_closed_and_opaque(tmp_path: Path,
     pub_key_file.write_text("release3 public key")
 
     workspace = tmp_path / "workspace"
-    publisher = GitMirrorPublisher(forge_url="https://forge.example.com", group="testgroup")
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com", group="testgroup"
+    )
 
     # 1. Missing public_key must fail closed
     with pytest.raises(ValueError, match="public verification key is required"):
         publisher.publish_source(
-            source_path=source_file, package="rhtl-gate-pkg", version="2.0.0",
-            workspace_dir=workspace, source_registry="rhtl", public_key=None, dry_run=True,
+            source_path=source_file,
+            package="rhtl-gate-pkg",
+            version="2.0.0",
+            workspace_dir=workspace,
+            source_registry="rhtl",
+            public_key=None,
+            dry_run=True,
         )
 
     # 2. cosign verify failure must fail closed
-    monkeypatch.setattr("taisce_cuan.provenance.verify.shutil.which", lambda _: "/bin/cosign")
+    monkeypatch.setattr(
+        "taisce_cuan.provenance.verify.shutil.which", lambda _: "/bin/cosign"
+    )
     real_run = subprocess.run
 
     def cosign_fail(command, **kwargs):
         if command[0] == "/bin/cosign":
-            return SimpleNamespace(returncode=1, stdout="", stderr="signature check failed")
+            return SimpleNamespace(
+                returncode=1, stdout="", stderr="signature check failed"
+            )
         return real_run(command, **kwargs)
 
     monkeypatch.setattr("taisce_cuan.provenance.verify.subprocess.run", cosign_fail)
     with pytest.raises(RuntimeError, match="cosign verify-blob-attestation failed"):
         publisher.publish_source(
-            source_path=source_file, package="rhtl-gate-pkg", version="2.0.0",
-            workspace_dir=workspace, source_registry="rhtl", public_key=str(pub_key_file), dry_run=True,
+            source_path=source_file,
+            package="rhtl-gate-pkg",
+            version="2.0.0",
+            workspace_dir=workspace,
+            source_registry="rhtl",
+            public_key=str(pub_key_file),
+            dry_run=True,
         )
 
-    # 3. Successful verification: adapted DSSE published, RHTL evidence remains opaque (no provenance.dsse)
+    # 3. Successful verification: adapted DSSE published, RHTL evidence remains
+    #    opaque (no provenance.dsse)
     def cosign_ok(command, **kwargs):
         if command[0] == "/bin/cosign":
             return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -890,8 +1142,13 @@ def test_publish_source_rhtl_verification_fail_closed_and_opaque(tmp_path: Path,
 
     monkeypatch.setattr("taisce_cuan.provenance.verify.subprocess.run", cosign_ok)
     publisher.publish_source(
-        source_path=source_file, package="rhtl-gate-pkg", version="2.0.0",
-        workspace_dir=workspace, source_registry="rhtl", public_key=str(pub_key_file), dry_run=True,
+        source_path=source_file,
+        package="rhtl-gate-pkg",
+        version="2.0.0",
+        workspace_dir=workspace,
+        source_registry="rhtl",
+        public_key=str(pub_key_file),
+        dry_run=True,
     )
     repo = workspace / "pypi.org-rhtl-gate-pkg"
     lightwell = repo / ".lightwell"
@@ -900,14 +1157,14 @@ def test_publish_source_rhtl_verification_fail_closed_and_opaque(tmp_path: Path,
     assert not (lightwell / "provenance.dsse").exists()
 
 
-
-
 def test_legacy_provenance_is_not_converted_or_published(tmp_path: Path):
     source_file = create_sample_source(tmp_path, "legacy-provenance", "1.0.0")
     legacy = source_file.parent / "sdist-provenance.json"
     legacy.write_text('{"statement":"legacy attestation"}\n')
     workspace = tmp_path / "workspace"
-    GitMirrorPublisher(forge_url="https://forge.example.com", group="testgroup").publish_source(
+    GitMirrorPublisher(
+        forge_url="https://forge.example.com", group="testgroup"
+    ).publish_source(
         source_path=source_file,
         package="legacy-provenance",
         version="1.0.0",
@@ -922,19 +1179,22 @@ def test_legacy_provenance_is_not_converted_or_published(tmp_path: Path):
 
 def test_cli_push_auto_discover_metadata(tmp_path: Path):
     from taisce_cuan.cli import main
+
     source_file = create_sample_source(tmp_path, "auto-disc-pkg", "3.2.1")
     workspace = tmp_path / "cli_workspace"
 
-    exit_code = main([
-        "push",
-        f"--source={source_file}",
-        f"--workspace-dir={workspace}",
-        "--forge-url=https://forge.example.com",
-        "--group=testgroup",
-        "--committer-name=bot",
-        "--committer-email=bot@example.com",
-        "--dry-run",
-    ])
+    exit_code = main(
+        [
+            "push",
+            f"--source={source_file}",
+            f"--workspace-dir={workspace}",
+            "--forge-url=https://forge.example.com",
+            "--group=testgroup",
+            "--committer-name=bot",
+            "--committer-email=bot@example.com",
+            "--dry-run",
+        ]
+    )
     assert exit_code == 0
     repo_dir = workspace / "pypi.org-auto-disc-pkg"
     assert repo_dir.exists()
@@ -945,7 +1205,8 @@ def test_cli_push_auto_discover_metadata(tmp_path: Path):
 
 
 def test_cli_clean_process_invocation():
-    """Verify CLI entrypoint runs cleanly in an isolated Python process without circular imports."""
+    """Verify CLI entrypoint runs cleanly in an isolated Python process without
+    circular imports."""
     import os
     import subprocess
     import sys
