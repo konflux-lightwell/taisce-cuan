@@ -144,11 +144,14 @@ def extract_sdist_to_source(sdist_path: Path, dest_source_dir: Path) -> str:
                 if not infolist:
                     raise ValueError(f"Empty sdist archive: {sdist_path}")
 
-                # Path traversal / Zip Slip prevention
+                # Path traversal / Zip Slip prevention and link rejection
                 for member in infolist:
                     target = (staging_dir / member.filename).resolve()
                     if not (target == resolved_staging or target.is_relative_to(resolved_staging)):
                         raise ValueError(f"Dangerous path traversal zip entry: {member.filename}")
+                    unix_mode = (member.external_attr >> 16) & 0o170000
+                    if unix_mode == 0o120000:
+                        raise ValueError(f"Symbolic link zip entry is not allowed: {member.filename}")
 
                 zf.extractall(staging_dir)
         elif tarfile.is_tarfile(sdist_path):
@@ -161,6 +164,8 @@ def extract_sdist_to_source(sdist_path: Path, dest_source_dir: Path) -> str:
                     target = (staging_dir / member.name).resolve()
                     if not target.is_relative_to(resolved_staging):
                         raise ValueError(f"Dangerous path traversal tar entry: {member.name}")
+                    if member.issym() or member.islnk():
+                        raise ValueError(f"Link tar entry is not allowed: {member.name}")
 
                 if hasattr(tarfile, "data_filter"):
                     tar.extractall(path=staging_dir, filter="data")
@@ -179,17 +184,19 @@ def extract_sdist_to_source(sdist_path: Path, dest_source_dir: Path) -> str:
 
         # Clear destination directory and copy extracted content
         for item in dest_source_dir.iterdir():
-            if item.is_dir():
-                shutil.rmtree(item)
-            else:
+            if item.is_symlink() or not item.is_dir():
                 item.unlink()
+            else:
+                shutil.rmtree(item)
 
         for item in source_content.iterdir():
+            if item.is_symlink():
+                raise ValueError(f"Link encountered during archive copy: {item}")
             dest_item = dest_source_dir / item.name
             if item.is_dir():
-                shutil.copytree(item, dest_item)
+                shutil.copytree(item, dest_item, symlinks=True)
             else:
-                shutil.copy2(item, dest_item)
+                shutil.copy2(item, dest_item, follow_symlinks=False)
     finally:
         if staging_dir.exists():
             shutil.rmtree(staging_dir)

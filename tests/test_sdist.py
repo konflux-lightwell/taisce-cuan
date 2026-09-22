@@ -1,4 +1,6 @@
 import tarfile
+import zipfile
+
 import pytest
 from pathlib import Path
 from taisce_cuan.sdist import canonicalize_name, compute_sha256, extract_sdist_to_source
@@ -51,6 +53,38 @@ def test_extract_sdist_and_sha256(tmp_path: Path):
     assert root_name == "testpkg-1.0.0"
     assert (source_dir / "pyproject.toml").exists()
     assert (source_dir / "testpkg.py").exists()
+
+
+def test_extract_sdist_rejects_tar_symbolic_and_hard_links(tmp_path: Path):
+    source_dir = tmp_path / "source"
+    archive = tmp_path / "linked-1.0.0.tar.gz"
+
+    with tarfile.open(archive, "w:gz") as tar:
+        symlink = tarfile.TarInfo("linked-1.0.0/symlink")
+        symlink.type = tarfile.SYMTYPE
+        symlink.linkname = "/outside"
+        tar.addfile(symlink)
+        hardlink = tarfile.TarInfo("linked-1.0.0/hardlink")
+        hardlink.type = tarfile.LNKTYPE
+        hardlink.linkname = "linked-1.0.0/target"
+        tar.addfile(hardlink)
+
+    with pytest.raises(ValueError, match="Link tar entry is not allowed"):
+        extract_sdist_to_source(archive, source_dir)
+
+
+def test_extract_sdist_rejects_zip_symbolic_link(tmp_path: Path):
+    source_dir = tmp_path / "source"
+    archive = tmp_path / "linked-1.0.0.zip"
+
+    info = zipfile.ZipInfo("linked-1.0.0/symlink")
+    info.create_system = 3
+    info.external_attr = (0o120777 << 16) | 0xA000
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr(info, "../../outside")
+
+    with pytest.raises(ValueError, match="Symbolic link zip entry is not allowed"):
+        extract_sdist_to_source(archive, source_dir)
 
 
 def test_extract_sdist_path_traversal_rejection(tmp_path: Path):
