@@ -1,7 +1,8 @@
 from pathlib import Path
 
-
-TASK = Path(__file__).parents[1] / "tekton/tasks/archive-sources/0.1/archive-sources.yaml"
+TASK = (
+    Path(__file__).parents[1] / "tekton/tasks/archive-sources/0.1/archive-sources.yaml"
+)
 
 
 def test_archive_sources_uses_sign_key_and_preserves_legacy_key_files():
@@ -9,7 +10,7 @@ def test_archive_sources_uses_sign_key_and_preserves_legacy_key_files():
 
     # Secret keys are exported as environment variables, allowing the mounted
     # production secret's SIGN_KEY and AWS KMS credentials to reach cosign.
-    assert 'default: konflux-cosign-signing-production' in task
+    assert "default: konflux-cosign-signing-production" in task
     assert 'export "${secret_key}=$(cat "${secret_file}")"' in task
     assert 'ARGS+=("--sign-key=${SIGN_KEY}")' in task
 
@@ -20,8 +21,14 @@ def test_archive_sources_uses_sign_key_and_preserves_legacy_key_files():
 
 def test_archive_sources_mounts_signing_secret_read_only_and_optional():
     task = TASK.read_text()
-    volume = task[task.index("    - name: signing-secret"):task.index("  stepTemplate:")]
-    mounts = task[task.index("      - name: signing-secret", task.index("  stepTemplate:")):task.index("  steps:")]
+    volume = task[
+        task.index("    - name: signing-secret") : task.index("  stepTemplate:")
+    ]
+    mounts = task[
+        task.index(
+            "      - name: signing-secret", task.index("  stepTemplate:")
+        ) : task.index("  steps:")
+    ]
 
     assert "secretName: $(params.signingSecretName)" in volume
     assert "optional: true" in volume

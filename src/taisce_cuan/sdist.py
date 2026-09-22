@@ -71,9 +71,13 @@ def inspect_sdist_metadata(sdist_path: Path) -> tuple[str, str]:
                             if name and version:
                                 return name, version
                 # Check root directory name pattern (e.g. package-1.0.0/)
-                root_parts = [m.name.split("/")[0] for m in members if "/" in m.name or m.isdir()]
+                root_parts = [
+                    m.name.split("/")[0] for m in members if "/" in m.name or m.isdir()
+                ]
                 if root_parts:
-                    m = re.match(r"^([a-zA-Z0-9_.-]+?)-([0-9][a-zA-Z0-9_.+]*)$", root_parts[0])
+                    m = re.match(
+                        r"^([a-zA-Z0-9_.-]+?)-([0-9][a-zA-Z0-9_.+]*)$", root_parts[0]
+                    )
                     if m:
                         return m.group(1), m.group(2)
         except Exception:
@@ -93,7 +97,9 @@ def inspect_sdist_metadata(sdist_path: Path) -> tuple[str, str]:
                 # Check root directory name in zip
                 roots = [name.split("/")[0] for name in z.namelist() if "/" in name]
                 if roots:
-                    m = re.match(r"^([a-zA-Z0-9_.-]+?)-([0-9][a-zA-Z0-9_.+]*)$", roots[0])
+                    m = re.match(
+                        r"^([a-zA-Z0-9_.-]+?)-([0-9][a-zA-Z0-9_.+]*)$", roots[0]
+                    )
                     if m:
                         return m.group(1), m.group(2)
         except Exception:
@@ -108,7 +114,9 @@ def inspect_sdist_metadata(sdist_path: Path) -> tuple[str, str]:
             if m:
                 return m.group(1), m.group(2)
 
-    raise ValueError(f"Could not determine package name and version from sdist archive: {sdist_path}")
+    raise ValueError(
+        f"Could not determine package name and version from sdist archive: {sdist_path}"
+    )
 
 
 def compute_sha256(file_path: Path) -> str:
@@ -147,8 +155,13 @@ def extract_sdist_to_source(sdist_path: Path, dest_source_dir: Path) -> str:
                 # Path traversal / Zip Slip prevention
                 for member in infolist:
                     target = (staging_dir / member.filename).resolve()
-                    if not (target == resolved_staging or target.is_relative_to(resolved_staging)):
-                        raise ValueError(f"Dangerous path traversal zip entry: {member.filename}")
+                    if not (
+                        target == resolved_staging
+                        or target.is_relative_to(resolved_staging)
+                    ):
+                        raise ValueError(
+                            f"Dangerous path traversal zip entry: {member.filename}"
+                        )
 
                 zf.extractall(staging_dir)
         elif tarfile.is_tarfile(sdist_path):
@@ -160,14 +173,18 @@ def extract_sdist_to_source(sdist_path: Path, dest_source_dir: Path) -> str:
                 for member in members:
                     target = (staging_dir / member.name).resolve()
                     if not target.is_relative_to(resolved_staging):
-                        raise ValueError(f"Dangerous path traversal tar entry: {member.name}")
+                        raise ValueError(
+                            f"Dangerous path traversal tar entry: {member.name}"
+                        )
 
                 if hasattr(tarfile, "data_filter"):
                     tar.extractall(path=staging_dir, filter="data")
                 else:
                     tar.extractall(path=staging_dir)
         else:
-            raise ValueError(f"Unsupported or corrupted sdist archive format: {sdist_path}")
+            raise ValueError(
+                f"Unsupported or corrupted sdist archive format: {sdist_path}"
+            )
 
         top_entries = list(staging_dir.iterdir())
         if len(top_entries) == 1 and top_entries[0].is_dir():

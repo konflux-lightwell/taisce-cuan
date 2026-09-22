@@ -22,7 +22,6 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -32,9 +31,17 @@ from taisce_cuan.sdist import canonicalize_name, compute_sha256
 
 logger = logging.getLogger(__name__)
 
-RHTL_SIMPLE_DEFAULT = "https://packages.redhat.com/api/pypi/public-trusted-libraries/main/simple"
+RHTL_SIMPLE_DEFAULT = (
+    "https://packages.redhat.com/api/pypi/public-trusted-libraries/main/simple"
+)
 PYPI_API_DEFAULT = "https://pypi.org/pypi"
-SUPPORTED_REGISTRIES = {"rhtl", "packages.redhat.com", "pypi", "pypi.org", "pypi.python.org"}
+SUPPORTED_REGISTRIES = {
+    "rhtl",
+    "packages.redhat.com",
+    "pypi",
+    "pypi.org",
+    "pypi.python.org",
+}
 MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 
 
@@ -49,8 +56,8 @@ class SdistSourceInfo:
     download_url: str
     sha256: str
     size: int
-    upload_time: Optional[str]
-    provenance_url: Optional[str] = None
+    upload_time: str | None
+    provenance_url: str | None = None
 
 
 class SdistSourceFetcher:
@@ -60,7 +67,7 @@ class SdistSourceFetcher:
         self,
         rhtl_simple_url: str = RHTL_SIMPLE_DEFAULT,
         pypi_api_url: str = PYPI_API_DEFAULT,
-        client: Optional[httpx.Client] = None,
+        client: httpx.Client | None = None,
         max_download_bytes: int = MAX_DOWNLOAD_BYTES,
     ):
         check_https(rhtl_simple_url)
@@ -72,29 +79,32 @@ class SdistSourceFetcher:
         self._reset_state()
 
     def _reset_state(self) -> None:
-        self.last_rhtl_index: Optional[bytes] = None
-        self.last_rhtl_url: Optional[str] = None
-        self.last_rhtl_status: Optional[int] = None
-        self.last_rhtl_reason: Optional[str] = None
-        self.last_advertised_provenance: Optional[bytes] = None
-        self.last_advertised_provenance_sha256: Optional[str] = None
-        self.last_advertised_provenance_status: Optional[int] = None
-        self.last_advertised_provenance_remote_url: Optional[str] = None
+        self.last_rhtl_index: bytes | None = None
+        self.last_rhtl_url: str | None = None
+        self.last_rhtl_status: int | None = None
+        self.last_rhtl_reason: str | None = None
+        self.last_advertised_provenance: bytes | None = None
+        self.last_advertised_provenance_sha256: str | None = None
+        self.last_advertised_provenance_status: int | None = None
+        self.last_advertised_provenance_remote_url: str | None = None
 
-    def query_rhtl(self, package: str, version: str) -> Optional[SdistSourceInfo]:
+    def query_rhtl(self, package: str, version: str) -> SdistSourceInfo | None:
         canonical = canonicalize_name(package)
         url = f"{self.rhtl_simple_url}/{canonical}/"
         self.last_rhtl_url = url
         try:
-            response = self._client.get(url, headers={"Accept": "application/vnd.pypi.simple.v1+json"})
+            response = self._client.get(
+                url, headers={"Accept": "application/vnd.pypi.simple.v1+json"}
+            )
             self.last_rhtl_status = response.status_code
             self.last_rhtl_index = response.content
             if response.status_code != 200:
                 self.last_rhtl_reason = "unavailable"
                 return None
             data = response.json()
-            # Escape each hyphen-delimited segment separately so that re.escape() doesn't
-            # turn hyphens into \-, which breaks the [-_.] character class when substituted.
+            # Escape each hyphen-delimited segment separately so that re.escape()
+            # doesn't turn hyphens into \-, which breaks the [-_.] character class
+            # when substituted.
             name_pat = r"[-_.]".join(re.escape(p) for p in canonical.split("-"))
             pattern = re.compile(rf"^{name_pat}-{re.escape(version)}\.tar\.gz$", re.I)
             for entry in data.get("files", []):
@@ -103,7 +113,9 @@ class SdistSourceFetcher:
                     if provenance is None:
                         self.last_rhtl_reason = "not-advertised"
                     elif not isinstance(provenance, str) or not provenance.strip():
-                        raise ValueError(f"Invalid provenance URL in RHTL index: {provenance!r}")
+                        raise ValueError(
+                            f"Invalid provenance URL in RHTL index: {provenance!r}"
+                        )
                     else:
                         check_https(provenance)
                     return SdistSourceInfo(
@@ -122,7 +134,7 @@ class SdistSourceFetcher:
             logger.warning("Error querying RHTL for %s %s: %s", package, version, exc)
         return None
 
-    def query_pypi(self, package: str, version: str) -> Optional[SdistSourceInfo]:
+    def query_pypi(self, package: str, version: str) -> SdistSourceInfo | None:
         url = f"{self.pypi_api_url}/{package}/{version}/json"
         try:
             response = self._client.get(url)
@@ -141,10 +153,14 @@ class SdistSourceFetcher:
             logger.warning("Error querying PyPI for %s %s: %s", package, version, exc)
         return None
 
-    def download_exact(self, url: str, destination: Path, expected_sha: str, expected_size: int = 0) -> None:
+    def download_exact(
+        self, url: str, destination: Path, expected_sha: str, expected_size: int = 0
+    ) -> None:
         check_https(url)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+        fd, temporary = tempfile.mkstemp(
+            prefix=f".{destination.name}.", dir=destination.parent
+        )
         Path(temporary).unlink(missing_ok=True)
         try:
             with self._client.stream("GET", url) as response:
@@ -159,14 +175,20 @@ class SdistSourceFetcher:
                 with open(temporary, "wb") as out:
                     for chunk in response.iter_bytes():
                         size += len(chunk)
-                        if size > self.max_download_bytes or (expected_size and size > expected_size):
+                        if size > self.max_download_bytes or (
+                            expected_size and size > expected_size
+                        ):
                             raise ValueError("download exceeded advertised size")
                         out.write(chunk)
                 if expected_size and size != expected_size:
-                    raise ValueError(f"download size mismatch: expected {expected_size}, got {size}")
+                    raise ValueError(
+                        f"download size mismatch: expected {expected_size}, got {size}"
+                    )
             actual = compute_sha256(Path(temporary))
             if actual.lower() != expected_sha.lower():
-                raise ValueError(f"SHA-256 mismatch: expected {expected_sha}, got {actual}")
+                raise ValueError(
+                    f"SHA-256 mismatch: expected {expected_sha}, got {actual}"
+                )
             Path(temporary).replace(destination)
         finally:
             Path(temporary).unlink(missing_ok=True)
@@ -176,9 +198,9 @@ class SdistSourceFetcher:
         package: str,
         version: str,
         output_dir: Path,
-        registries: Optional[list[str] | str] = None,
+        registries: list[str] | str | None = None,
         rhtl_only: bool = False,
-    ) -> tuple[Path, SdistSourceInfo, Optional[SdistSourceInfo]]:
+    ) -> tuple[Path, SdistSourceInfo, SdistSourceInfo | None]:
         self._reset_state()
 
         if isinstance(registries, str):
@@ -191,13 +213,25 @@ class SdistSourceFetcher:
             if reg not in SUPPORTED_REGISTRIES:
                 raise ValueError(f"Unrecognized registry '{reg}'")
 
-        rhtl = self.query_rhtl(package, version) if any(x in ("rhtl", "packages.redhat.com") for x in req) else None
-        pypi = self.query_pypi(package, version) if any(x in ("pypi", "pypi.org", "pypi.python.org") for x in req) else None
+        rhtl = (
+            self.query_rhtl(package, version)
+            if any(x in ("rhtl", "packages.redhat.com") for x in req)
+            else None
+        )
+        pypi = (
+            self.query_pypi(package, version)
+            if any(x in ("pypi", "pypi.org", "pypi.python.org") for x in req)
+            else None
+        )
         selected = rhtl or pypi
         if selected is None:
-            raise RuntimeError(f"Package {package} {version} could not be resolved from {req}")
+            raise RuntimeError(
+                f"Package {package} {version} could not be resolved from {req}"
+            )
         if not selected.sha256:
-            raise ValueError(f"No SHA-256 digest provided by registry '{selected.registry}'")
+            raise ValueError(
+                f"No SHA-256 digest provided by registry '{selected.registry}'"
+            )
 
         root = output_dir
         root.mkdir(parents=True, exist_ok=True)
@@ -209,7 +243,7 @@ class SdistSourceFetcher:
         if self.last_rhtl_index is not None:
             (root / "rhtl-index.pep691.json").write_bytes(self.last_rhtl_index)
 
-        raw_advertised: Optional[bytes] = None
+        raw_advertised: bytes | None = None
         if selected.provenance_url is not None:
             check_https(selected.provenance_url)
             response = self._client.get(selected.provenance_url)

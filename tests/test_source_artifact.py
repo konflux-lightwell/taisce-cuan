@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 from pathlib import Path
+
 import pytest
 
 from taisce_cuan.source import (

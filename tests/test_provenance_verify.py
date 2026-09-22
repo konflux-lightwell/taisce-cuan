@@ -17,34 +17,26 @@ limitations under the License.
 from __future__ import annotations
 
 import json
-from pathlib import Path
-import shutil
-import subprocess
 import tarfile
+from pathlib import Path
 from types import SimpleNamespace
+
 import pytest
 
-from taisce_cuan.source import GitMirrorPublisher
 from taisce_cuan.provenance.verify import (
     ProvenanceVerificationError,
     SourceRoute,
     adapt_rhtl_pep740,
     copy_verified_evidence,
-    extract_pep740_predicate_type,
-    load_json_object,
-    locate_source_artifact_paths,
     normalize_source_route,
-    verify_acquired_source,
     verify_blob_attestation,
     verify_lightwell_attestations,
     verify_normalized_source_artifact,
     verify_relative_artifact_path,
     verify_sha256,
-    verify_transformation,
-    verify_upstream_evidence,
 )
 from taisce_cuan.sdist import compute_sha256
-from taisce_cuan.source import ArtifactError
+from taisce_cuan.source import ArtifactError, GitMirrorPublisher
 
 
 def make_carrier(
@@ -67,7 +59,9 @@ def make_carrier(
     # Create valid tar.gz
     src_dir = carrier / f"src_{pkg}"
     src_dir.mkdir(parents=True, exist_ok=True)
-    (src_dir / "pyproject.toml").write_text(f"[project]\nname='{pkg}'\nversion='{ver}'\n")
+    (src_dir / "pyproject.toml").write_text(
+        f"[project]\nname='{pkg}'\nversion='{ver}'\n"
+    )
     with tarfile.open(orig_sdist, "w:gz") as tar:
         tar.add(src_dir, arcname=f"{pkg}-{ver}")
 
@@ -131,7 +125,9 @@ def make_carrier(
         "source_origin_sha256": origin_sha,
         "transformation": "normalized-sdist",
     }
-    (carrier / "sdist-transformation.json").write_text(json.dumps(transform_dict, sort_keys=True) + "\n")
+    (carrier / "sdist-transformation.json").write_text(
+        json.dumps(transform_dict, sort_keys=True) + "\n"
+    )
 
     return norm_sdist, carrier
 
@@ -141,7 +137,9 @@ def test_normalize_source_route():
     assert normalize_source_route("packages.redhat.com") == SourceRoute.RHTL
     assert normalize_source_route("pypi.org") == SourceRoute.PYPI
 
-    with pytest.raises(ProvenanceVerificationError, match="Unsupported source registry"):
+    with pytest.raises(
+        ProvenanceVerificationError, match="Unsupported source registry"
+    ):
         normalize_source_route("unsupported-forge.org")
 
 
@@ -179,15 +177,21 @@ def test_verify_sha256(tmp_path: Path):
 
 
 def test_verify_normalized_source_artifact_pypi(tmp_path: Path):
-    norm_sdist, carrier = make_carrier(tmp_path, "sample-pkg", "1.0.0", registry="pypi.org", mode="pypi")
-    verified = verify_normalized_source_artifact(norm_sdist, package="sample-pkg", version="1.0.0")
+    norm_sdist, carrier = make_carrier(
+        tmp_path, "sample-pkg", "1.0.0", registry="pypi.org", mode="pypi"
+    )
+    verified = verify_normalized_source_artifact(
+        norm_sdist, package="sample-pkg", version="1.0.0"
+    )
 
     assert verified.package == "sample-pkg"
     assert verified.version == "1.0.0"
     assert verified.route == SourceRoute.PYPI
     assert verified.registry == "pypi.org"
     assert verified.normalized_sha256 == compute_sha256(norm_sdist)
-    assert verified.acquired_sha256 == compute_sha256(carrier / "downloads" / "sample-pkg-1.0.0.tar.gz")
+    assert verified.acquired_sha256 == compute_sha256(
+        carrier / "downloads" / "sample-pkg-1.0.0.tar.gz"
+    )
     assert verified.artifact.sdist == norm_sdist
     # PyPI evidence files: source-origin.json and sdist-transformation.json
     assert len(verified.evidence_files) == 2
@@ -203,7 +207,9 @@ def test_verify_normalized_source_artifact_rhtl_advertised(tmp_path: Path):
         advertised_rhtl=True,
         include_rhtl_index=True,
     )
-    verified = verify_normalized_source_artifact(norm_sdist, package="sample-rhtl", version="2.0.0")
+    verified = verify_normalized_source_artifact(
+        norm_sdist, package="sample-rhtl", version="2.0.0"
+    )
 
     assert verified.route == SourceRoute.RHTL
     assert verified.registry == "rhtl"
@@ -224,7 +230,9 @@ def test_verify_normalized_source_artifact_rhtl_unadvertised(tmp_path: Path):
         advertised_rhtl=False,
         include_rhtl_index=True,
     )
-    verified = verify_normalized_source_artifact(norm_sdist, package="sample-unadv", version="1.5.0")
+    verified = verify_normalized_source_artifact(
+        norm_sdist, package="sample-unadv", version="1.5.0"
+    )
 
     assert verified.route == SourceRoute.RHTL
     names = [f.name for f in verified.evidence_files]
@@ -238,7 +246,9 @@ def test_verify_distinct_normalized_and_original_hashes(tmp_path: Path):
     norm_sdist, carrier = make_carrier(
         tmp_path, "distinct-hashes", "1.0.0", distinct_normalized=True
     )
-    verified = verify_normalized_source_artifact(norm_sdist, package="distinct-hashes", version="1.0.0")
+    verified = verify_normalized_source_artifact(
+        norm_sdist, package="distinct-hashes", version="1.0.0"
+    )
 
     assert verified.normalized_sha256 != verified.acquired_sha256
 
@@ -248,8 +258,12 @@ def test_verify_fails_on_tampered_acquired_archive(tmp_path: Path):
     orig = carrier / "downloads" / "tampered-orig-1.0.0.tar.gz"
     orig.write_text("tampered bytes")
 
-    with pytest.raises(ProvenanceVerificationError, match="original archive digest mismatch"):
-        verify_normalized_source_artifact(norm_sdist, package="tampered-orig", version="1.0.0")
+    with pytest.raises(
+        ProvenanceVerificationError, match="original archive digest mismatch"
+    ):
+        verify_normalized_source_artifact(
+            norm_sdist, package="tampered-orig", version="1.0.0"
+        )
 
 
 def test_verify_fails_on_transformation_input_mismatch(tmp_path: Path):
@@ -259,20 +273,28 @@ def test_verify_fails_on_transformation_input_mismatch(tmp_path: Path):
     data["input"]["sha256"] = "1" * 64
     tf.write_text(json.dumps(data))
 
-    with pytest.raises(ProvenanceVerificationError, match="sdist transformation input does not match"):
-        verify_normalized_source_artifact(norm_sdist, package="transform-mismatch", version="1.0.0")
+    with pytest.raises(
+        ProvenanceVerificationError, match="sdist transformation input does not match"
+    ):
+        verify_normalized_source_artifact(
+            norm_sdist, package="transform-mismatch", version="1.0.0"
+        )
 
 
 def test_copy_verified_evidence(tmp_path: Path):
     norm_sdist, carrier = make_carrier(tmp_path, "copy-ev", "1.0.0")
-    verified = verify_normalized_source_artifact(norm_sdist, package="copy-ev", version="1.0.0")
+    verified = verify_normalized_source_artifact(
+        norm_sdist, package="copy-ev", version="1.0.0"
+    )
 
     dest = tmp_path / "lightwell_target"
     copy_verified_evidence(verified.evidence_files, dest)
 
     assert (dest / "source-origin.json").exists()
     assert (dest / "sdist-transformation.json").exists()
-    assert (dest / "source-origin.json").read_bytes() == (carrier / "source-origin.json").read_bytes()
+    assert (dest / "source-origin.json").read_bytes() == (
+        carrier / "source-origin.json"
+    ).read_bytes()
 
 
 def test_verify_lightwell_attestations(tmp_path: Path):
@@ -283,13 +305,17 @@ def test_verify_lightwell_attestations(tmp_path: Path):
     verify_lightwell_attestations(lightwell, route=SourceRoute.PYPI, signed=False)
 
     # Signed PyPI missing metadata.dsse.json -> fails closed
-    with pytest.raises(ProvenanceVerificationError, match="missing .lightwell/metadata.dsse.json"):
+    with pytest.raises(
+        ProvenanceVerificationError, match="missing .lightwell/metadata.dsse.json"
+    ):
         verify_lightwell_attestations(lightwell, route=SourceRoute.PYPI, signed=True)
 
     (lightwell / "metadata.dsse.json").write_text("meta dsse")
 
     # Signed PyPI missing provenance.dsse.json -> fails closed
-    with pytest.raises(ProvenanceVerificationError, match="missing .lightwell/provenance.dsse.json"):
+    with pytest.raises(
+        ProvenanceVerificationError, match="missing .lightwell/provenance.dsse.json"
+    ):
         verify_lightwell_attestations(lightwell, route=SourceRoute.PYPI, signed=True)
 
     (lightwell / "provenance.dsse.json").write_text("prov dsse")
@@ -302,15 +328,34 @@ def test_rhtl_pep740_adaptation_preserves_base64_and_rejects_malformed(tmp_path:
     output = tmp_path / "provenance.dsse.json"
     payload = "eyJwcmVjaXNlbHkiOiJub3QtZGVjb2RlZCJ9=="
     signature = "c2lnbmF0dXJlLXN0cmluZw=="
-    raw.write_bytes(json.dumps({"attestation_bundles": [{"attestations": [{"envelope": {
-        "statement": payload, "signature": signature}}]}]}).encode())
-    
+    raw.write_bytes(
+        json.dumps(
+            {
+                "attestation_bundles": [
+                    {
+                        "attestations": [
+                            {"envelope": {"statement": payload, "signature": signature}}
+                        ]
+                    }
+                ]
+            }
+        ).encode()
+    )
+
     # Test direct module function
     adapt_rhtl_pep740(raw, output)
     adapted = json.loads(output.read_text())
-    assert adapted == {"payloadType": "application/vnd.in-toto+json", "payload": payload,
-                       "signatures": [{"sig": signature}]}
-    assert json.loads(raw.read_bytes())["attestation_bundles"][0]["attestations"][0]["envelope"]["statement"] == payload
+    assert adapted == {
+        "payloadType": "application/vnd.in-toto+json",
+        "payload": payload,
+        "signatures": [{"sig": signature}],
+    }
+    assert (
+        json.loads(raw.read_bytes())["attestation_bundles"][0]["attestations"][0][
+            "envelope"
+        ]["statement"]
+        == payload
+    )
 
     # Test publisher facade
     output.unlink()
@@ -321,26 +366,64 @@ def test_rhtl_pep740_adaptation_preserves_base64_and_rejects_malformed(tmp_path:
     with pytest.raises(ValueError, match="malformed"):
         adapt_rhtl_pep740(raw, output)
     # Rejects multiple bundles
-    raw.write_text(json.dumps({"attestation_bundles": [
-        {"attestations": [{"envelope": {"statement": payload, "signature": signature}}]},
-        {"attestations": [{"envelope": {"statement": payload, "signature": signature}}]},
-    ]}))
+    raw.write_text(
+        json.dumps(
+            {
+                "attestation_bundles": [
+                    {
+                        "attestations": [
+                            {"envelope": {"statement": payload, "signature": signature}}
+                        ]
+                    },
+                    {
+                        "attestations": [
+                            {"envelope": {"statement": payload, "signature": signature}}
+                        ]
+                    },
+                ]
+            }
+        )
+    )
     with pytest.raises(ValueError, match="bundle"):
         adapt_rhtl_pep740(raw, output)
     # Rejects multiple attestations in a bundle
-    raw.write_text(json.dumps({"attestation_bundles": [
-        {"attestations": [
-            {"envelope": {"statement": payload, "signature": signature}},
-            {"envelope": {"statement": payload, "signature": signature}},
-        ]},
-    ]}))
+    raw.write_text(
+        json.dumps(
+            {
+                "attestation_bundles": [
+                    {
+                        "attestations": [
+                            {
+                                "envelope": {
+                                    "statement": payload,
+                                    "signature": signature,
+                                }
+                            },
+                            {
+                                "envelope": {
+                                    "statement": payload,
+                                    "signature": signature,
+                                }
+                            },
+                        ]
+                    },
+                ]
+            }
+        )
+    )
     with pytest.raises(ValueError, match="attestation"):
         adapt_rhtl_pep740(raw, output)
     # Rejects malformed nested elements (would raise AttributeError if not handled)
-    raw.write_text(json.dumps({"attestation_bundles": [{"attestations": ["not-a-dict"]}]}))
+    raw.write_text(
+        json.dumps({"attestation_bundles": [{"attestations": ["not-a-dict"]}]})
+    )
     with pytest.raises(ValueError, match="malformed"):
         adapt_rhtl_pep740(raw, output)
-    raw.write_text(json.dumps({"attestation_bundles": [{"attestations": [{"envelope": "not-a-dict"}]}]}))
+    raw.write_text(
+        json.dumps(
+            {"attestation_bundles": [{"attestations": [{"envelope": "not-a-dict"}]}]}
+        )
+    )
     with pytest.raises(ValueError, match="malformed"):
         adapt_rhtl_pep740(raw, output)
     raw.write_text(json.dumps({"attestation_bundles": ["not-a-dict"]}))
@@ -351,23 +434,40 @@ def test_rhtl_pep740_adaptation_preserves_base64_and_rejects_malformed(tmp_path:
         adapt_rhtl_pep740(raw, output)
 
 
-def test_verify_blob_attestation_targets_acquired_and_never_resigns(monkeypatch, tmp_path: Path):
+def test_verify_blob_attestation_targets_acquired_and_never_resigns(
+    monkeypatch, tmp_path: Path
+):
     source = tmp_path / "downloads" / "original.tar.gz"
     signature = tmp_path / "provenance.dsse.json"
     key = tmp_path / "release3.pub"
-    source.parent.mkdir(); source.write_bytes(b"original"); signature.write_text("{}\n"); key.write_text("public")
+    source.parent.mkdir()
+    source.write_bytes(b"original")
+    signature.write_text("{}\n")
+    key.write_text("public")
     captured = []
-    monkeypatch.setattr("taisce_cuan.provenance.verify.shutil.which", lambda _: "/bin/cosign")
-    monkeypatch.setattr("taisce_cuan.provenance.verify.subprocess.run", lambda command, **kwargs: captured.append(command) or SimpleNamespace(returncode=0, stderr=""))
-    
+    monkeypatch.setattr(
+        "taisce_cuan.provenance.verify.shutil.which", lambda _: "/bin/cosign"
+    )
+    monkeypatch.setattr(
+        "taisce_cuan.provenance.verify.subprocess.run",
+        lambda command, **kwargs: (
+            captured.append(command) or SimpleNamespace(returncode=0, stderr="")
+        ),
+    )
+
     # Test direct module function
     verify_blob_attestation(source, signature, str(key))
     assert captured[0][1] == "verify-blob-attestation"
     assert captured[0][-1] == str(source)
     assert "--key" in captured[0]
     assert str(key) in captured[0]
-    assert "--signature" in captured[0] or any(arg.startswith("--signature=") or arg.startswith("--bundle=") for arg in captured[0])
-    assert "--type" in captured[0] or any(arg.startswith("--type=") for arg in captured[0])
+    assert "--signature" in captured[0] or any(
+        arg.startswith("--signature=") or arg.startswith("--bundle=")
+        for arg in captured[0]
+    )
+    assert "--type" in captured[0] or any(
+        arg.startswith("--type=") for arg in captured[0]
+    )
     assert "attest-blob" not in captured[0]
 
     # Test publisher facade
@@ -388,9 +488,14 @@ def test_verify_blob_attestation_targets_acquired_and_never_resigns(monkeypatch,
         verify_blob_attestation(source, signature, str(key))
 
     # Fails closed if cosign returns non-zero exit code
-    monkeypatch.setattr("taisce_cuan.provenance.verify.shutil.which", lambda _: "/bin/cosign")
-    monkeypatch.setattr("taisce_cuan.provenance.verify.subprocess.run", lambda *args, **kwargs: SimpleNamespace(returncode=1, stderr="signature verification failed", stdout=""))
+    monkeypatch.setattr(
+        "taisce_cuan.provenance.verify.shutil.which", lambda _: "/bin/cosign"
+    )
+    monkeypatch.setattr(
+        "taisce_cuan.provenance.verify.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1, stderr="signature verification failed", stdout=""
+        ),
+    )
     with pytest.raises(RuntimeError, match="cosign verify-blob-attestation failed"):
         verify_blob_attestation(source, signature, str(key))
-
-

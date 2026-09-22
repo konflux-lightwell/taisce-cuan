@@ -37,7 +37,8 @@ class AcquiredSourceArtifact:
 
 @dataclass(frozen=True)
 class NormalizedSourceArtifact:
-    """Carried paths for a normalized source distribution and its transformation record."""
+    """Carried paths for a normalized source distribution and its transformation
+    record."""
 
     root: Path
     acquired: AcquiredSourceArtifact

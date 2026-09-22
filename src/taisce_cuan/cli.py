@@ -22,8 +22,8 @@ import os
 import sys
 from pathlib import Path
 
-from taisce_cuan.source import GitMirrorPublisher, SdistSourceFetcher
 from taisce_cuan.sdist import inspect_sdist_metadata
+from taisce_cuan.source import GitMirrorPublisher, SdistSourceFetcher
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("taisce-cuan")
@@ -32,35 +32,119 @@ logger = logging.getLogger("taisce-cuan")
 def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="taisce-cuan",
-        description="Lightwell Python source distribution ingestion and preservation tool",
+        description=(
+            "Lightwell Python source distribution ingestion and preservation tool"
+        ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # fetch command
-    fetch_parser = subparsers.add_parser("fetch", help="Fetch a source archive from RHTL/PyPI and verify its checksum")
+    fetch_parser = subparsers.add_parser(
+        "fetch", help="Fetch a source archive from RHTL/PyPI and verify its checksum"
+    )
     fetch_parser.add_argument("package", help="Package name (e.g. sniffio)")
     fetch_parser.add_argument("version", help="Package version (e.g. 1.3.1)")
-    fetch_parser.add_argument("--output-dir", "-o", default="./sdists", help="Directory to save downloaded source archive")
-    fetch_parser.add_argument("--registries", default="rhtl,pypi.org", help="Comma-separated ordered list of source registries to query (e.g. 'rhtl,pypi.org', 'rhtl', 'pypi.org')")
-    fetch_parser.add_argument("--rhtl-only", action="store_true", help="Fail if not found in RHTL (deprecated: use --registries=rhtl)")
+    fetch_parser.add_argument(
+        "--output-dir",
+        "-o",
+        default="./sdists",
+        help="Directory to save downloaded source archive",
+    )
+    fetch_parser.add_argument(
+        "--registries",
+        default="rhtl,pypi.org",
+        help=(
+            "Comma-separated ordered list of source registries to query "
+            "(e.g. 'rhtl,pypi.org', 'rhtl', 'pypi.org')"
+        ),
+    )
+    fetch_parser.add_argument(
+        "--rhtl-only",
+        action="store_true",
+        help="Fail if not found in RHTL (deprecated: use --registries=rhtl)",
+    )
 
     # push command
-    push_parser = subparsers.add_parser("push", help="Unpack source archive, generate SLSA metadata, commit and push to Git forge")
-    push_parser.add_argument("--source", "--sdist", "-s", required=True, dest="source", help="Path to local source archive (.tar.gz)")
-    push_parser.add_argument("--package", "-p", default=None, help="Package name (optional; auto-discovered from source archive if omitted)")
-    push_parser.add_argument("--version", "-v", default=None, help="Package version (optional; auto-discovered from source archive if omitted)")
-    push_parser.add_argument("--workspace-dir", "-w", default="/tmp/taisce-work", help="Working directory for git repo")
-    push_parser.add_argument("--forge-url", "--gitlab-url", required=True, help="Git forge base URL")
-    push_parser.add_argument("--group", required=True, help="Target group or organization on the forge")
-    push_parser.add_argument("--remote-url", default=os.getenv("GIT_REMOTE_URL"), help="Explicit full remote Git repository URL")
-    push_parser.add_argument("--auth-token", default=os.getenv("GITLAB_TOKEN") or os.getenv("GIT_AUTH_TOKEN"), help="Git forge access token")
-    push_parser.add_argument("--committer-name", required=True, help="Git author and committer name")
-    push_parser.add_argument("--committer-email", required=True, help="Git author and committer email")
-    push_parser.add_argument("--sign-key", default=os.getenv("SIGN_KEY"), help="Path or KMS key ID for cosign attestation signing")
-    push_parser.add_argument("--public-key", default=os.getenv("PUBLIC_KEY"), help="Immutable public verification key for RHTL provenance verification")
-    push_parser.add_argument("--rhtl-predicate-type", default=os.getenv("RHTL_PREDICATE_TYPE"), help="Expected in-toto predicate type for RHTL provenance verification")
-    push_parser.add_argument("--provenance-path", type=Path, help="Explicit file path where signed provenance should be written")
-    push_parser.add_argument("--dry-run", action="store_true", help="Do not push to remote")
+    push_parser = subparsers.add_parser(
+        "push",
+        help=(
+            "Unpack source archive, generate SLSA metadata, commit and push to "
+            "Git forge"
+        ),
+    )
+    push_parser.add_argument(
+        "--source",
+        "--sdist",
+        "-s",
+        required=True,
+        dest="source",
+        help="Path to local source archive (.tar.gz)",
+    )
+    push_parser.add_argument(
+        "--package",
+        "-p",
+        default=None,
+        help="Package name (optional; auto-discovered from source archive if omitted)",
+    )
+    push_parser.add_argument(
+        "--version",
+        "-v",
+        default=None,
+        help=(
+            "Package version (optional; auto-discovered from source archive if omitted)"
+        ),
+    )
+    push_parser.add_argument(
+        "--workspace-dir",
+        "-w",
+        default="/tmp/taisce-work",
+        help="Working directory for git repo",
+    )
+    push_parser.add_argument(
+        "--forge-url", "--gitlab-url", required=True, help="Git forge base URL"
+    )
+    push_parser.add_argument(
+        "--group", required=True, help="Target group or organization on the forge"
+    )
+    push_parser.add_argument(
+        "--remote-url",
+        default=os.getenv("GIT_REMOTE_URL"),
+        help="Explicit full remote Git repository URL",
+    )
+    push_parser.add_argument(
+        "--auth-token",
+        default=os.getenv("GITLAB_TOKEN") or os.getenv("GIT_AUTH_TOKEN"),
+        help="Git forge access token",
+    )
+    push_parser.add_argument(
+        "--committer-name", required=True, help="Git author and committer name"
+    )
+    push_parser.add_argument(
+        "--committer-email", required=True, help="Git author and committer email"
+    )
+    push_parser.add_argument(
+        "--sign-key",
+        default=os.getenv("SIGN_KEY"),
+        help="Path or KMS key ID for cosign attestation signing",
+    )
+    push_parser.add_argument(
+        "--public-key",
+        default=os.getenv("PUBLIC_KEY"),
+        help="Immutable public verification key for RHTL provenance verification",
+    )
+    push_parser.add_argument(
+        "--rhtl-predicate-type",
+        default=os.getenv("RHTL_PREDICATE_TYPE"),
+        help="Expected in-toto predicate type for RHTL provenance verification",
+    )
+    push_parser.add_argument(
+        "--provenance-path",
+        type=Path,
+        help="Explicit file path where signed provenance should be written",
+    )
+    push_parser.add_argument(
+        "--dry-run", action="store_true", help="Do not push to remote"
+    )
 
     return parser
 
@@ -97,9 +181,14 @@ def handle_push(args: argparse.Namespace) -> int:
             discovered_pkg, discovered_ver = inspect_sdist_metadata(source_path)
             package = package or discovered_pkg
             version = version or discovered_ver
-            logger.info(f"Auto-discovered package metadata from archive: {package}=={version}")
+            logger.info(
+                f"Auto-discovered package metadata from archive: {package}=={version}"
+            )
         except Exception as e:
-            logger.error(f"Failed to auto-discover package name or version from {source_path}: {e}")
+            logger.error(
+                f"Failed to auto-discover package name or version from "
+                f"{source_path}: {e}"
+            )
             return 1
 
     publisher = GitMirrorPublisher(
