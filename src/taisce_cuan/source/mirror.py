@@ -20,6 +20,7 @@ import json
 import logging
 import shutil
 import subprocess
+import time
 import urllib.parse
 from pathlib import Path
 
@@ -58,8 +59,7 @@ def _is_rhtl_registry(registry: str | None) -> bool:
 
 
 class GitMirrorPublisher:
-    """Manages Git initialization, metadata creation, and pushing to Git forges
-    with SemVer topology."""
+    """Manages Git initialization, metadata creation, and pushing to Git forges."""
 
     adapt_rhtl_pep740 = staticmethod(adapt_rhtl_pep740)
     extract_pep740_predicate_type = staticmethod(extract_pep740_predicate_type)
@@ -83,6 +83,83 @@ class GitMirrorPublisher:
         self.committer_email = committer_email
         self.explicit_remote_url = remote_url
 
+    def _gitlab_get_project(
+        self, client: httpx.Client, encoded_project: str, headers: dict
+    ) -> str | None:
+        """GET a GitLab project by encoded path. Returns http_url_to_repo or None."""
+        resp = client.get(
+            f"{self.forge_url}/api/v4/projects/{encoded_project}",
+            headers=headers,
+        )
+        if resp.status_code == 200:
+            return resp.json()["http_url_to_repo"]
+        return None
+
+    def _gitlab_get_group_id(
+        self, client: httpx.Client, encoded_group: str, headers: dict
+    ) -> int | None:
+        """GET a GitLab group by encoded path. Returns the numeric group ID or None."""
+        resp = client.get(
+            f"{self.forge_url}/api/v4/groups/{encoded_group}",
+            headers=headers,
+        )
+        if resp.status_code == 200:
+            return resp.json()["id"]
+        return None
+
+    def _gitlab_create_project(
+        self,
+        client: httpx.Client,
+        group_id: int,
+        repo_name: str,
+        encoded_project: str,
+        headers: dict,
+    ) -> str | None:
+        """Create a GitLab project. On 400 with path-taken, retries GET to handle
+        race conditions where a concurrent job created the project between our
+        initial GET and this POST."""
+        resp = client.post(
+            f"{self.forge_url}/api/v4/projects",
+            headers=headers,
+            json={
+                "name": repo_name,
+                "path": repo_name,
+                "namespace_id": group_id,
+                "initialize_with_readme": False,
+                "visibility": "internal",
+            },
+        )
+        if resp.status_code == 201:
+            logger.info(f"Created new forge repository {self.group}/{repo_name}")
+            return resp.json()["http_url_to_repo"]
+
+        already_exists = resp.status_code == 400 and (
+            "has already been taken" in resp.text or "already exists" in resp.text
+        )
+        if already_exists:
+            # The namespace was created by a concurrent job but the project record may
+            # not yet be visible due to GitLab write-visibility lag — retry with
+            # backoff.
+            for attempt in range(1, 4):
+                logger.info(
+                    f"Project {self.group}/{repo_name} was created by a concurrent "
+                    f"process; retrying GET (attempt {attempt})"
+                )
+                url = self._gitlab_get_project(client, encoded_project, headers)
+                if url:
+                    return url
+                time.sleep(attempt * 2)
+            logger.warning(
+                f"Project {self.group}/{repo_name} still not visible after retries; "
+                f"falling back to constructed URL"
+            )
+
+        logger.warning(
+            f"Could not create forge project {self.group}/{repo_name}: "
+            f"POST {resp.status_code}: {resp.text}"
+        )
+        return None
+
     def ensure_remote_project(self, repo_name: str) -> str:
         """Ensure the project exists on the remote forge, creating it via API if
         supported."""
@@ -95,9 +172,7 @@ class GitMirrorPublisher:
             )
             return f"{self.forge_url}/{self.group}/{repo_name}.git"
 
-        is_gitlab = "gitlab" in self.forge_url.lower()
-
-        if not is_gitlab:
+        if "gitlab" not in self.forge_url.lower():
             logger.warning(
                 f"Forge '{self.forge_url}' is not GitLab. Automatic repo creation "
                 f"via API is not supported. "
@@ -107,40 +182,22 @@ class GitMirrorPublisher:
 
         headers = {"PRIVATE-TOKEN": self.auth_token}
         encoded_project = urllib.parse.quote(f"{self.group}/{repo_name}", safe="")
+        encoded_group = urllib.parse.quote(self.group, safe="")
 
         try:
             with httpx.Client(timeout=15.0, verify=True) as client:
-                resp = client.get(
-                    f"{self.forge_url}/api/v4/projects/{encoded_project}",
-                    headers=headers,
-                )
-                if resp.status_code == 200:
+                url = self._gitlab_get_project(client, encoded_project, headers)
+                if url:
                     logger.info(f"Forge repository {self.group}/{repo_name} exists")
-                    return resp.json()["http_url_to_repo"]
+                    return url
 
-                encoded_group = urllib.parse.quote(self.group, safe="")
-                group_resp = client.get(
-                    f"{self.forge_url}/api/v4/groups/{encoded_group}", headers=headers
-                )
-                if group_resp.status_code == 200:
-                    group_id = group_resp.json()["id"]
-                    create_payload = {
-                        "name": repo_name,
-                        "path": repo_name,
-                        "namespace_id": group_id,
-                        "initialize_with_readme": False,
-                        "visibility": "internal",
-                    }
-                    create_resp = client.post(
-                        f"{self.forge_url}/api/v4/projects",
-                        headers=headers,
-                        json=create_payload,
+                group_id = self._gitlab_get_group_id(client, encoded_group, headers)
+                if group_id is not None:
+                    url = self._gitlab_create_project(
+                        client, group_id, repo_name, encoded_project, headers
                     )
-                    if create_resp.status_code == 201:
-                        logger.info(
-                            f"Created new forge repository {self.group}/{repo_name}"
-                        )
-                        return create_resp.json()["http_url_to_repo"]
+                    if url:
+                        return url
         except Exception as e:
             logger.warning(f"Could not verify or create forge project via API: {e}")
 
