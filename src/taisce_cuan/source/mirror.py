@@ -46,6 +46,25 @@ from taisce_cuan.sdist import canonicalize_name, extract_sdist_to_source
 
 logger = logging.getLogger(__name__)
 
+# Bot user ID for the balor-fianna-pipeline-v2 group access token on
+# lightwell/lightwell-builds (group id 275340), confirmed 2026-08-14 via the
+# GitLab members API. Mirrors the constant in balor-fianna's gitlab_mirror.py;
+# both services must agree so balor-fianna can force-move tags after ingest.
+_BALOR_FIANNA_BOT_USER_ID = 33366
+_PROTECTED_TAG_PATTERNS = ("baseline/*", "novel-head/*")
+
+
+def _is_already_protected(body: dict | None) -> bool:
+    """True when a GitLab 409/422 body indicates the pattern is already protected."""
+    if not isinstance(body, dict):
+        return False
+    message = body.get("message")
+    if isinstance(message, str):
+        return "already been taken" in message
+    if isinstance(message, list):
+        return any("already been taken" in str(m) for m in message)
+    return False
+
 
 def parse_version_safe(ver_str: str) -> Version | None:
     try:
@@ -85,15 +104,76 @@ class GitMirrorPublisher:
 
     def _gitlab_get_project(
         self, client: httpx.Client, encoded_project: str, headers: dict
-    ) -> str | None:
-        """GET a GitLab project by encoded path. Returns http_url_to_repo or None."""
+    ) -> tuple[str, int] | None:
+        """GET a GitLab project. Returns (http_url_to_repo, project_id) or None."""
         resp = client.get(
             f"{self.forge_url}/api/v4/projects/{encoded_project}",
             headers=headers,
         )
         if resp.status_code == 200:
-            return resp.json()["http_url_to_repo"]
+            data = resp.json()
+            return data["http_url_to_repo"], data["id"]
         return None
+
+    def _gitlab_resolve_self_user_id(
+        self, client: httpx.Client, headers: dict
+    ) -> int | None:
+        """GET /api/v4/user to resolve the token's own numeric GitLab user ID."""
+        resp = client.get(f"{self.forge_url}/api/v4/user", headers=headers)
+        if resp.status_code == 200:
+            return resp.json().get("id")
+        logger.warning(
+            "Could not resolve own GitLab user ID: HTTP %s", resp.status_code
+        )
+        return None
+
+    def _gitlab_protect_tag_patterns(
+        self, client: httpx.Client, project_id: int, headers: dict
+    ) -> None:
+        """Best-effort: protect baseline/* and novel-head/* on a mirror project.
+
+        Allows both taisce-cuan's own SA (resolved dynamically) and the
+        balor-fianna pipeline bot, so both services can create/move these tags.
+        Never raises — a failure must not block the ingestion push.
+        """
+        self_user_id = self._gitlab_resolve_self_user_id(client, headers)
+        allowed: list[dict] = [{"user_id": _BALOR_FIANNA_BOT_USER_ID}]
+        if self_user_id is not None:
+            allowed.append({"user_id": self_user_id})
+
+        for pattern in _PROTECTED_TAG_PATTERNS:
+            try:
+                resp = client.post(
+                    f"{self.forge_url}/api/v4/projects/{project_id}/protected_tags",
+                    headers=headers,
+                    json={"name": pattern, "allowed_to_create": allowed},
+                )
+                if resp.status_code in (200, 201):
+                    logger.info(
+                        "Protected tag pattern %r on project %s", pattern, project_id
+                    )
+                elif resp.status_code in (409, 422) and _is_already_protected(
+                    resp.json()
+                ):
+                    logger.debug(
+                        "Tag pattern %r already protected on project %s",
+                        pattern,
+                        project_id,
+                    )
+                else:
+                    logger.warning(
+                        "Could not protect tag pattern %r on project %s: HTTP %s",
+                        pattern,
+                        project_id,
+                        resp.status_code,
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to protect tag pattern %r on project %s",
+                    pattern,
+                    project_id,
+                    exc_info=True,
+                )
 
     def _gitlab_get_group_id(
         self, client: httpx.Client, encoded_group: str, headers: dict
@@ -114,10 +194,10 @@ class GitMirrorPublisher:
         repo_name: str,
         encoded_project: str,
         headers: dict,
-    ) -> str | None:
+    ) -> tuple[str, int] | None:
         """Create a GitLab project. On 400 with path-taken, retries GET to handle
         race conditions where a concurrent job created the project between our
-        initial GET and this POST."""
+        initial GET and this POST. Returns (http_url_to_repo, project_id) or None."""
         resp = client.post(
             f"{self.forge_url}/api/v4/projects",
             headers=headers,
@@ -131,7 +211,8 @@ class GitMirrorPublisher:
         )
         if resp.status_code == 201:
             logger.info(f"Created new forge repository {self.group}/{repo_name}")
-            return resp.json()["http_url_to_repo"]
+            data = resp.json()
+            return data["http_url_to_repo"], data["id"]
 
         already_exists = resp.status_code == 400 and (
             "has already been taken" in resp.text or "already exists" in resp.text
@@ -145,9 +226,9 @@ class GitMirrorPublisher:
                     f"Project {self.group}/{repo_name} was created by a concurrent "
                     f"process; retrying GET (attempt {attempt})"
                 )
-                url = self._gitlab_get_project(client, encoded_project, headers)
-                if url:
-                    return url
+                result = self._gitlab_get_project(client, encoded_project, headers)
+                if result:
+                    return result
                 time.sleep(attempt * 2)
             logger.warning(
                 f"Project {self.group}/{repo_name} still not visible after retries; "
@@ -186,17 +267,21 @@ class GitMirrorPublisher:
 
         try:
             with httpx.Client(timeout=15.0, verify=True) as client:
-                url = self._gitlab_get_project(client, encoded_project, headers)
-                if url:
+                result = self._gitlab_get_project(client, encoded_project, headers)
+                if result:
+                    url, project_id = result
                     logger.info(f"Forge repository {self.group}/{repo_name} exists")
+                    self._gitlab_protect_tag_patterns(client, project_id, headers)
                     return url
 
                 group_id = self._gitlab_get_group_id(client, encoded_group, headers)
                 if group_id is not None:
-                    url = self._gitlab_create_project(
+                    result = self._gitlab_create_project(
                         client, group_id, repo_name, encoded_project, headers
                     )
-                    if url:
+                    if result:
+                        url, project_id = result
+                        self._gitlab_protect_tag_patterns(client, project_id, headers)
                         return url
         except Exception as e:
             logger.warning(f"Could not verify or create forge project via API: {e}")
