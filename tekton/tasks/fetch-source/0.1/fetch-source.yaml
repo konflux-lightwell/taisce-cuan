@@ -74,20 +74,14 @@ spec:
         requests:
           memory: 128Mi
           cpu: 50m
-      script: |
-        #!/usr/bin/env bash
-        set -euo pipefail
-
-        SDISTS_DIR="/var/workdir/sdists-repo"
-        mkdir -p "${SDISTS_DIR}"
-
-        taisce-cuan fetch "$(params.packageName)" "$(params.packageVersion)" \
-          --output-dir "${SDISTS_DIR}" \
-          --registries="$(params.sourceRegistries)"
-
-        CANONICAL=$(python3 -c "import re, sys; print(re.sub(r'[-_.]+', '-', sys.argv[1]).lower())" \
-          "$(params.packageName)")
-        echo -n "downloads/${CANONICAL}-$(params.packageVersion).tar.gz" > "$(results.sdistPath.path)"
+      command:
+        - taisce-cuan-fetch-sdist
+      args:
+        - $(params.packageName)
+        - $(params.packageVersion)
+        - --output-dir=/var/workdir/sdists-repo
+        - --registries=$(params.sourceRegistries)
+        - --result-path=$(results.sdistPath.path)
 
     - name: create-sdists-artifact
       image: quay.io/konflux-ci/build-trusted-artifacts:latest@sha256:2712c8a6453fc9db5fc4c2d9d952554a4eea46d2fdba47a272b79fa07f8c8c40
