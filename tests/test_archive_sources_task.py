@@ -5,18 +5,13 @@ TASK = (
 )
 
 
-def test_archive_sources_uses_sign_key_and_preserves_legacy_key_files():
+def test_archive_sources_push_source_step_uses_entrypoint():
     task = TASK.read_text()
 
-    # Secret keys are exported as environment variables, allowing the mounted
-    # production secret's SIGN_KEY and AWS KMS credentials to reach cosign.
+    # The push-source step calls the Python entrypoint directly, not a bash script.
+    # Sign-key and env-var handling are tested in tests/tekton/test_push_source.py.
     assert "default: konflux-cosign-signing-production" in task
-    assert 'export "${secret_key}=$(cat "${secret_file}")"' in task
-    assert 'ARGS+=("--sign-key=${SIGN_KEY}")' in task
-
-    # Existing callers using file-backed cosign keys remain supported.
-    assert 'ARGS+=("--sign-key=/etc/signing-secret/key.pem")' in task
-    assert 'ARGS+=("--sign-key=/etc/signing-secret/cosign.key")' in task
+    assert "taisce-cuan-push-source" in task
 
 
 def test_archive_sources_mounts_signing_secret_read_only_and_optional():
