@@ -199,8 +199,9 @@ def handle_push(args: argparse.Namespace) -> int:
             )
             return 1
 
-    raw_ids = args.tag_protection_user_ids or ""
-    tag_protection_user_ids = [int(x.strip()) for x in raw_ids.split(",") if x.strip()]
+    tag_protection_user_ids = [
+        int(x.strip()) for x in args.tag_protection_user_ids.split(",") if x.strip()
+    ]
 
     publisher = GitMirrorPublisher(
         forge_url=args.forge_url,

@@ -1263,7 +1263,7 @@ def _make_mock_client(project_id: int) -> MagicMock:
 
 
 def test_ensure_remote_project_protects_tag_patterns_on_creation():
-    """Both patterns are protected with the configured user IDs on new project creation."""
+    """Both patterns are protected with configured user IDs on new project creation."""
     project_id = 42
     allowed_user_ids = [11111, 22222]
     mock_client = _make_mock_client(project_id)
