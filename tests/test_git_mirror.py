@@ -1225,15 +1225,12 @@ def test_cli_clean_process_invocation():
     assert "Lightwell Python source distribution ingestion" in result.stdout
 
 
-def _make_mock_client(project_id: int, self_user_id: int) -> MagicMock:
+def _make_mock_client(project_id: int) -> MagicMock:
     """Build a mock httpx.Client that simulates a fresh GitLab project creation."""
 
     def mock_get(url, **kwargs):
         resp = MagicMock()
-        if "/api/v4/user" in url:
-            resp.status_code = 200
-            resp.json.return_value = {"id": self_user_id}
-        elif "/api/v4/projects/" in url:
+        if "/api/v4/projects/" in url:
             resp.status_code = 404
         elif "/api/v4/groups/" in url:
             resp.status_code = 200
@@ -1266,17 +1263,16 @@ def _make_mock_client(project_id: int, self_user_id: int) -> MagicMock:
 
 
 def test_ensure_remote_project_protects_tag_patterns_on_creation():
-    """Both patterns are protected with both bot user IDs on new project creation."""
-    from taisce_cuan.source.mirror import _BALOR_FIANNA_BOT_USER_ID
-
-    self_user_id = 7777
+    """Both patterns are protected with the configured user IDs on new project creation."""
     project_id = 42
-    mock_client = _make_mock_client(project_id, self_user_id)
+    allowed_user_ids = [11111, 22222]
+    mock_client = _make_mock_client(project_id)
 
     publisher = GitMirrorPublisher(
         forge_url="https://gitlab.example.com",
         group="group",
         auth_token="test-token",
+        tag_protection_user_ids=allowed_user_ids,
     )
 
     with patch("taisce_cuan.source.mirror.httpx.Client", return_value=mock_client):
@@ -1295,23 +1291,17 @@ def test_ensure_remote_project_protects_tag_patterns_on_creation():
 
     for call in protection_calls:
         user_ids = {entry["user_id"] for entry in call["allowed_to_create"]}
-        assert _BALOR_FIANNA_BOT_USER_ID in user_ids
-        assert self_user_id in user_ids
+        assert user_ids == set(allowed_user_ids)
 
 
 def test_ensure_remote_project_protects_tag_patterns_on_existing_project():
     """Tag patterns are also protected when the project already exists."""
-    from taisce_cuan.source.mirror import _BALOR_FIANNA_BOT_USER_ID
-
-    self_user_id = 7777
     project_id = 99
+    allowed_user_ids = [11111, 22222]
 
     def mock_get(url, **kwargs):
         resp = MagicMock()
-        if "/api/v4/user" in url:
-            resp.status_code = 200
-            resp.json.return_value = {"id": self_user_id}
-        elif "/api/v4/projects/" in url:
+        if "/api/v4/projects/" in url:
             resp.status_code = 200
             resp.json.return_value = {
                 "http_url_to_repo": "https://gitlab.example.com/group/repo.git",
@@ -1337,6 +1327,7 @@ def test_ensure_remote_project_protects_tag_patterns_on_existing_project():
         forge_url="https://gitlab.example.com",
         group="group",
         auth_token="test-token",
+        tag_protection_user_ids=allowed_user_ids,
     )
 
     with patch("taisce_cuan.source.mirror.httpx.Client", return_value=mock_client):
@@ -1351,21 +1342,54 @@ def test_ensure_remote_project_protects_tag_patterns_on_existing_project():
     assert protected_patterns == {"baseline/*", "novel-head/*"}
     for call in protection_calls:
         user_ids = {entry["user_id"] for entry in call["allowed_to_create"]}
-        assert _BALOR_FIANNA_BOT_USER_ID in user_ids
-        assert self_user_id in user_ids
+        assert user_ids == set(allowed_user_ids)
 
 
-def test_ensure_remote_project_protect_already_exists_is_noop():
-    """A 422 'already been taken' on protected_tags is silently accepted."""
-    self_user_id = 7777
+def test_ensure_remote_project_skips_tag_protection_when_no_user_ids():
+    """No protected_tags API call is made when tag_protection_user_ids is empty."""
     project_id = 42
 
     def mock_get(url, **kwargs):
         resp = MagicMock()
-        if "/api/v4/user" in url:
+        if "/api/v4/projects/" in url:
             resp.status_code = 200
-            resp.json.return_value = {"id": self_user_id}
-        elif "/api/v4/projects/" in url:
+            resp.json.return_value = {
+                "http_url_to_repo": "https://gitlab.example.com/group/repo.git",
+                "id": project_id,
+            }
+        else:
+            resp.status_code = 404
+        return resp
+
+    mock_client = MagicMock()
+    mock_client.get.side_effect = mock_get
+    mock_client.__enter__ = lambda s: s
+    mock_client.__exit__ = MagicMock(return_value=False)
+
+    publisher = GitMirrorPublisher(
+        forge_url="https://gitlab.example.com",
+        group="group",
+        auth_token="test-token",
+    )
+
+    with patch("taisce_cuan.source.mirror.httpx.Client", return_value=mock_client):
+        publisher.ensure_remote_project("repo")
+
+    protection_calls = [
+        call
+        for call in mock_client.post.call_args_list
+        if "protected_tags" in call.args[0]
+    ]
+    assert protection_calls == []
+
+
+def test_ensure_remote_project_protect_already_exists_is_noop():
+    """A 422 'already been taken' on protected_tags is silently accepted."""
+    project_id = 42
+
+    def mock_get(url, **kwargs):
+        resp = MagicMock()
+        if "/api/v4/projects/" in url:
             resp.status_code = 200
             resp.json.return_value = {
                 "http_url_to_repo": "https://gitlab.example.com/group/repo.git",
@@ -1391,6 +1415,7 @@ def test_ensure_remote_project_protect_already_exists_is_noop():
         forge_url="https://gitlab.example.com",
         group="group",
         auth_token="test-token",
+        tag_protection_user_ids=[11111],
     )
 
     with patch("taisce_cuan.source.mirror.httpx.Client", return_value=mock_client):

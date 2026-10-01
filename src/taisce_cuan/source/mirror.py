@@ -46,11 +46,6 @@ from taisce_cuan.sdist import canonicalize_name, extract_sdist_to_source
 
 logger = logging.getLogger(__name__)
 
-# Bot user ID for the balor-fianna-pipeline-v2 group access token on
-# lightwell/lightwell-builds (group id 275340), confirmed 2026-08-14 via the
-# GitLab members API. Mirrors the constant in balor-fianna's gitlab_mirror.py;
-# both services must agree so balor-fianna can force-move tags after ingest.
-_BALOR_FIANNA_BOT_USER_ID = 33366
 _PROTECTED_TAG_PATTERNS = ("baseline/*", "novel-head/*")
 
 
@@ -93,6 +88,7 @@ class GitMirrorPublisher:
         committer_name: str = "taisce-cuan bot",
         committer_email: str = "lightwell@redhat.com",
         remote_url: str | None = None,
+        tag_protection_user_ids: list[int] | None = None,
     ):
         self.forge_url = forge_url.rstrip("/")
         self.group = group.strip("/")
@@ -101,6 +97,7 @@ class GitMirrorPublisher:
         self.committer_name = committer_name
         self.committer_email = committer_email
         self.explicit_remote_url = remote_url
+        self.tag_protection_user_ids: list[int] = tag_protection_user_ids or []
 
     def _gitlab_get_project(
         self, client: httpx.Client, encoded_project: str, headers: dict
@@ -115,31 +112,18 @@ class GitMirrorPublisher:
             return data["http_url_to_repo"], data["id"]
         return None
 
-    def _gitlab_resolve_self_user_id(
-        self, client: httpx.Client, headers: dict
-    ) -> int | None:
-        """GET /api/v4/user to resolve the token's own numeric GitLab user ID."""
-        resp = client.get(f"{self.forge_url}/api/v4/user", headers=headers)
-        if resp.status_code == 200:
-            return resp.json().get("id")
-        logger.warning(
-            "Could not resolve own GitLab user ID: HTTP %s", resp.status_code
-        )
-        return None
-
     def _gitlab_protect_tag_patterns(
         self, client: httpx.Client, project_id: int, headers: dict
     ) -> None:
         """Best-effort: protect baseline/* and novel-head/* on a mirror project.
 
-        Allows both taisce-cuan's own SA (resolved dynamically) and the
-        balor-fianna pipeline bot, so both services can create/move these tags.
+        Allows the user IDs supplied via tag_protection_user_ids.
         Never raises — a failure must not block the ingestion push.
         """
-        self_user_id = self._gitlab_resolve_self_user_id(client, headers)
-        allowed: list[dict] = [{"user_id": _BALOR_FIANNA_BOT_USER_ID}]
-        if self_user_id is not None:
-            allowed.append({"user_id": self_user_id})
+        if not self.tag_protection_user_ids:
+            return
+
+        allowed: list[dict] = [{"user_id": uid} for uid in self.tag_protection_user_ids]
 
         for pattern in _PROTECTED_TAG_PATTERNS:
             try:
