@@ -77,6 +77,10 @@ spec:
       description: Optional explicit full remote Git repository URL.
       type: string
       default: ""
+    - name: tagProtectionUserIds
+      description: Comma-separated list of GitLab user IDs allowed to create protected tags (e.g. '11111,22222'). When empty, tag protection is skipped.
+      type: string
+      default: ""
     - name: signingSecretName
       description: Name of secret containing SIGN_KEY, PUBLIC_KEY, and/or cosign credentials (optional).
       type: string
@@ -288,6 +292,10 @@ spec:
 
         if [ -n "$(params.gitRemoteUrl)" ]; then
           ARGS+=("--remote-url=$(params.gitRemoteUrl)")
+        fi
+
+        if [ -n "$(params.tagProtectionUserIds)" ]; then
+          ARGS+=("--tag-protection-user-ids=$(params.tagProtectionUserIds)")
         fi
 
         if [ -n "$(params.provenancePath)" ]; then

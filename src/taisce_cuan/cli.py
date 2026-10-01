@@ -143,6 +143,14 @@ def create_parser() -> argparse.ArgumentParser:
         help="Explicit file path where signed provenance should be written",
     )
     push_parser.add_argument(
+        "--tag-protection-user-ids",
+        default=os.getenv("TAG_PROTECTION_USER_IDS", ""),
+        help=(
+            "Comma-separated list of GitLab user IDs allowed to create protected tags "
+            "(e.g. '11111,22222')"
+        ),
+    )
+    push_parser.add_argument(
         "--dry-run", action="store_true", help="Do not push to remote"
     )
 
@@ -191,6 +199,9 @@ def handle_push(args: argparse.Namespace) -> int:
             )
             return 1
 
+    raw_ids = args.tag_protection_user_ids or ""
+    tag_protection_user_ids = [int(x.strip()) for x in raw_ids.split(",") if x.strip()]
+
     publisher = GitMirrorPublisher(
         forge_url=args.forge_url,
         group=args.group,
@@ -198,6 +209,7 @@ def handle_push(args: argparse.Namespace) -> int:
         committer_name=args.committer_name,
         committer_email=args.committer_email,
         remote_url=args.remote_url,
+        tag_protection_user_ids=tag_protection_user_ids,
     )
 
     try:
