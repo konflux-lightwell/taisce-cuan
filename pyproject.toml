@@ -20,6 +20,8 @@ dependencies = [
 
 [project.scripts]
 taisce-cuan = "taisce_cuan.cli:main"
+taisce-cuan-fetch-sdist = "taisce_cuan.tekton.fetch_sdist:main"
+taisce-cuan-push-source = "taisce_cuan.tekton.push_source:main"
 
 [dependency-groups]
 dev = [
