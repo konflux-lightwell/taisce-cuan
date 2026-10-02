@@ -42,11 +42,13 @@ def apply_ca_bundle(ca_bundle: Path) -> None:
         ca_bundle: Path to the CA bundle file. No-op when the file does not exist.
     """
     if not ca_bundle.is_file():
+        logger.debug("CA bundle not found at %s; using system trust store", ca_bundle)
         return
     path = str(ca_bundle)
     os.environ["SSL_CERT_FILE"] = path
     os.environ["REQUESTS_CA_BUNDLE"] = path
     os.environ["GIT_SSL_CAINFO"] = path
+    logger.info("Using CA bundle: %s", path)
 
 
 def read_git_auth_token(git_secret_dir: Path) -> str | None:
@@ -329,11 +331,21 @@ def main(argv: list[str] | None = None) -> int:
     if source_path is None or not source_path.is_file():
         logger.error("Source archive does not exist: %s", source_path)
         return 1
+    logger.info("Source archive: %s", source_path)
 
     signing_secret_dir = Path(args.signing_secret_dir)
     auth_token = read_git_auth_token(Path(args.git_secret_dir))
+    if auth_token:
+        logger.info("Git auth token loaded from %s", args.git_secret_dir)
+    else:
+        logger.warning("No Git auth token found in %s", args.git_secret_dir)
+
     export_signing_env_vars(signing_secret_dir)
     sign_key = resolve_sign_key(signing_secret_dir)
+    if sign_key:
+        logger.info("Sign key: %s", sign_key)
+    else:
+        logger.info("No sign key configured; attestation signing will be skipped")
 
     try:
         package, version = resolve_package_version(
@@ -345,8 +357,11 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("Failed to discover package metadata: %s", e)
         return 1
 
+    logger.info("Publishing %s==%s", package, version)
+
     forge_url = args.forge_url or args.gitlab_url
     group = args.group or args.gitlab_group
+    logger.info("Target forge: %s / %s", forge_url, group)
 
     publisher_kwargs: dict = {
         "committer_name": args.committer_name,
@@ -361,13 +376,26 @@ def main(argv: list[str] | None = None) -> int:
     if args.remote_url:
         publisher_kwargs["remote_url"] = args.remote_url
     if args.tag_protection_user_ids:
-        publisher_kwargs["tag_protection_user_ids"] = [
+        tag_protection_user_ids = [
             int(x.strip()) for x in args.tag_protection_user_ids.split(",") if x.strip()
         ]
+        publisher_kwargs["tag_protection_user_ids"] = tag_protection_user_ids
+        logger.info("Tag protection user IDs: %s", tag_protection_user_ids)
+    else:
+        logger.info("Tag protection user IDs: none configured, skipping")
+
+    if args.dry_run:
+        logger.info("Dry-run mode: git push will be skipped")
 
     publisher = GitMirrorPublisher(**publisher_kwargs)
 
     with resolve_public_key(signing_secret_dir) as public_key:
+        if public_key:
+            logger.info("Public verification key: %s", public_key)
+        else:
+            logger.info(
+                "No public key configured; RHTL provenance verification will be skipped"
+            )
         try:
             tag_name = publisher.publish_source(
                 source_path=source_path,
@@ -382,10 +410,12 @@ def main(argv: list[str] | None = None) -> int:
                 rhtl_predicate_type=args.rhtl_predicate_type or None,
                 dry_run=args.dry_run,
             )
-            logger.info("Published with tag %s", tag_name)
+            logger.info(
+                "Successfully published %s==%s with tag %s", package, version, tag_name
+            )
             return 0
         except Exception as e:
-            logger.error("Failed to push source: %s", e)
+            logger.error("Failed to push %s==%s: %s", package, version, e)
             return 1
 
 

@@ -67,23 +67,39 @@ def main(argv: list[str] | None = None) -> int:
     """
     args = create_parser().parse_args(argv)
 
+    logger.info(
+        "Fetching %s==%s from registries: %s",
+        args.package,
+        args.version,
+        args.registries,
+    )
+    logger.info("Output directory: %s", args.output_dir)
+
     fetcher = SdistSourceFetcher()
     try:
-        fetcher.fetch(
+        sdist_path, source_info, _ = fetcher.fetch(
             package=args.package,
             version=args.version,
             output_dir=Path(args.output_dir),
             registries=args.registries,
         )
     except Exception as e:
-        logger.error("Failed to fetch %s %s: %s", args.package, args.version, e)
+        logger.error("Failed to fetch %s==%s: %s", args.package, args.version, e)
         return 1
+
+    logger.info(
+        "Successfully fetched %s==%s from %s: %s",
+        args.package,
+        args.version,
+        source_info.registry,
+        sdist_path,
+    )
 
     if args.result_path:
         canonical = canonicalize_name(args.package)
-        Path(args.result_path).write_text(
-            f"downloads/{canonical}-{args.version}.tar.gz"
-        )
+        result = f"downloads/{canonical}-{args.version}.tar.gz"
+        Path(args.result_path).write_text(result)
+        logger.info("Tekton result written to %s: %s", args.result_path, result)
 
     return 0
 
