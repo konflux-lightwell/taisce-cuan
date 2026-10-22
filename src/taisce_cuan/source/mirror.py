@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import subprocess
 import time
@@ -48,6 +49,17 @@ logger = logging.getLogger(__name__)
 
 _PROTECTED_TAG_PATTERNS = ("baseline/*", "novel-head/*")
 
+_PROTECTED_GROUP = "lightwell/lightwell-builds"
+
+# A valid URI scheme per RFC 3986: a letter, then letters/digits/+/-/.,
+# anchored to the start of the string and immediately followed by "://".
+# Anchoring matters: a loose `"://" in remote_url` substring test would
+# misclassify a hybrid string like "user@host:ssh://group/repo.git" as
+# scheme://host/path (it contains "://"), when git itself disambiguates it
+# as SCP-style ([user@]host:path, with "user@host:ssh" as the destination)
+# because no "/" precedes the first ":".
+_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+
 
 def _is_already_protected(body: dict | None) -> bool:
     """True when a GitLab 409/422 body indicates the pattern is already protected."""
@@ -72,6 +84,59 @@ def _is_rhtl_registry(registry: str | None) -> bool:
     return (registry or "").strip().lower() in {"rhtl", "packages.redhat.com"}
 
 
+def _group_from_remote_url(remote_url: str) -> str:
+    """Resolve the GitLab group portion implied by a git remote URL.
+
+    Recognizes three forms, matching how `git` itself interprets remote
+    URLs:
+
+    - ``scheme://host/path`` (``https://``, ``ssh://``, ``file://``, etc.) —
+      detected by an *anchored* scheme check (the string must start with a
+      valid URI scheme immediately followed by ``://``), then parsed with
+      `urllib.parse.urlsplit`.
+    - A plain filesystem path (relative or absolute, no scheme, no colon) —
+      a legitimate local git remote transport; the whole string is the path.
+    - SCP-style ``[user@]host:path`` (e.g. ``bot@gitlab.example.com:group/
+      repo.git``) — doesn't start with a valid scheme, but a ``:`` appears
+      before the first ``/`` (or there is no ``/`` at all). Everything after
+      that first ``:`` is the path.
+
+    `urllib.parse.urlsplit` alone mis-parses SCP-style syntax: with no
+    ``://`` present it either swallows the entire string into `.path`
+    (when a ``@`` makes the leading segment an invalid URI scheme) or
+    misinterprets the host as a scheme — in both cases silently producing
+    a group value that can never match a protected group, even when the
+    URL genuinely targets one. The scheme check is deliberately *anchored*
+    to the start of the string rather than a loose ``"://" in remote_url``
+    substring test: git disambiguates by what precedes the first ``:``, so
+    a hybrid string like ``user@host:ssh://group/repo.git`` is SCP-style to
+    git (destination ``user@host:ssh``) even though it contains ``://``
+    later on; an unanchored check would wrongly route it to the
+    `urlsplit` branch instead. To avoid trusting an input shape we can't
+    confidently interpret, anything that is neither of the three forms
+    above raises `ValueError` rather than being waved through.
+    """
+    if _SCHEME_RE.match(remote_url):
+        path = urllib.parse.urlsplit(remote_url).path
+    elif ":" not in remote_url:
+        path = remote_url
+    else:
+        first_slash = remote_url.find("/")
+        first_colon = remote_url.find(":")
+        if first_slash == -1 or first_colon < first_slash:
+            path = remote_url[first_colon + 1 :]
+        else:
+            raise ValueError(
+                f"Cannot determine the destination group from remote_url "
+                f"{remote_url!r}: unrecognized URL form (neither "
+                f"scheme://host/path, a plain filesystem path, nor "
+                f"[user@]host:path SCP syntax)."
+            )
+
+    segments = path.strip("/").split("/")
+    return "/".join(segments[:-1]).lower()
+
+
 class GitMirrorPublisher:
     """Manages Git initialization, metadata creation, and pushing to Git forges."""
 
@@ -82,13 +147,14 @@ class GitMirrorPublisher:
     def __init__(
         self,
         forge_url: str = "https://gitlab.cee.redhat.com",
-        group: str = "lightwell/lightwell-builds",
+        group: str = "",
         auth_token: str | None = None,
         username: str = "oauth2",
         committer_name: str = "taisce-cuan bot",
         committer_email: str = "lightwell@redhat.com",
         remote_url: str | None = None,
         tag_protection_user_ids: list[int] | None = None,
+        allow_lightwell_builds_write: bool = False,
     ):
         self.forge_url = forge_url.rstrip("/")
         self.group = group.strip("/")
@@ -98,6 +164,30 @@ class GitMirrorPublisher:
         self.committer_email = committer_email
         self.explicit_remote_url = remote_url
         self.tag_protection_user_ids: list[int] = tag_protection_user_ids or []
+        self.allow_lightwell_builds_write = allow_lightwell_builds_write
+
+        resolved_group = self.group.lower()
+        resolved_remote_group = None
+        if self.explicit_remote_url:
+            resolved_remote_group = _group_from_remote_url(self.explicit_remote_url)
+
+        targets_protected_group = (
+            resolved_group == _PROTECTED_GROUP
+            or resolved_remote_group == _PROTECTED_GROUP
+        )
+        if targets_protected_group:
+            if not self.allow_lightwell_builds_write:
+                raise ValueError(
+                    f"Refusing to publish to the protected group "
+                    f"{_PROTECTED_GROUP!r}: this group is reserved for a "
+                    f"separate, already-authorized writer. Pass "
+                    f"allow_lightwell_builds_write=True to override explicitly."
+                )
+            logger.warning(
+                "Publishing to protected group %r with allow_lightwell_builds_write "
+                "override explicitly set",
+                _PROTECTED_GROUP,
+            )
 
     def _gitlab_get_project(
         self, client: httpx.Client, encoded_project: str, headers: dict

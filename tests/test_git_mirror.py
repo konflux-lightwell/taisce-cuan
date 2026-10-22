@@ -80,6 +80,158 @@ def create_sample_source(
     return source_file
 
 
+def test_publisher_blocks_protected_group_without_override():
+    with pytest.raises(ValueError, match="lightwell-builds"):
+        GitMirrorPublisher(
+            forge_url="https://gitlab.cee.redhat.com",
+            group="lightwell/lightwell-builds",
+            committer_name="bot",
+            committer_email="bot@example.com",
+        )
+
+
+def test_publisher_blocks_protected_group_case_insensitive():
+    with pytest.raises(ValueError, match="lightwell-builds"):
+        GitMirrorPublisher(
+            forge_url="https://gitlab.cee.redhat.com",
+            group="Lightwell/Lightwell-Builds",
+            committer_name="bot",
+            committer_email="bot@example.com",
+        )
+
+
+def test_publisher_allows_protected_group_with_override():
+    publisher = GitMirrorPublisher(
+        forge_url="https://gitlab.cee.redhat.com",
+        group="lightwell/lightwell-builds",
+        committer_name="bot",
+        committer_email="bot@example.com",
+        allow_lightwell_builds_write=True,
+    )
+    assert publisher.group == "lightwell/lightwell-builds"
+
+
+def test_publisher_allows_unrelated_group():
+    publisher = GitMirrorPublisher(
+        forge_url="https://gitlab.cee.redhat.com",
+        group="lightwell/lightwell-builds-midstream",
+        committer_name="bot",
+        committer_email="bot@example.com",
+    )
+    assert publisher.group == "lightwell/lightwell-builds-midstream"
+
+
+def test_publisher_blocks_protected_group_via_remote_url_bypass():
+    with pytest.raises(ValueError, match="lightwell-builds"):
+        GitMirrorPublisher(
+            forge_url="https://gitlab.cee.redhat.com",
+            group="some-unrelated-group",
+            committer_name="bot",
+            committer_email="bot@example.com",
+            remote_url="https://gitlab.cee.redhat.com/lightwell/lightwell-builds/pypi.org-foo.git",
+        )
+
+
+def test_publisher_allows_midstream_via_remote_url():
+    publisher = GitMirrorPublisher(
+        forge_url="https://gitlab.cee.redhat.com",
+        group="irrelevant",
+        committer_name="bot",
+        committer_email="bot@example.com",
+        remote_url="https://gitlab.cee.redhat.com/lightwell/lightwell-builds-midstream/pypi.org-foo.git",
+    )
+    assert publisher.explicit_remote_url.endswith("pypi.org-foo.git")
+
+
+def test_publisher_blocks_protected_group_via_scp_style_remote_url():
+    with pytest.raises(ValueError, match="lightwell-builds"):
+        GitMirrorPublisher(
+            forge_url="https://gitlab.cee.redhat.com",
+            group="some-unrelated-group",
+            committer_name="bot",
+            committer_email="bot@example.com",
+            remote_url="bot@gitlab.cee.redhat.com:lightwell/lightwell-builds/pypi.org-foo.git",
+        )
+
+
+def test_publisher_allows_midstream_via_scp_style_remote_url():
+    publisher = GitMirrorPublisher(
+        forge_url="https://gitlab.cee.redhat.com",
+        group="irrelevant",
+        committer_name="bot",
+        committer_email="bot@example.com",
+        remote_url=(
+            "bot@gitlab.cee.redhat.com:lightwell/lightwell-builds-midstream/"
+            "pypi.org-foo.git"
+        ),
+    )
+    assert publisher.explicit_remote_url.endswith("pypi.org-foo.git")
+
+
+def test_publisher_rejects_unparseable_remote_url():
+    with pytest.raises(ValueError, match="remote_url"):
+        GitMirrorPublisher(
+            forge_url="https://gitlab.cee.redhat.com",
+            group="irrelevant",
+            committer_name="bot",
+            committer_email="bot@example.com",
+            remote_url="/tmp/weird:colon/path/repo.git",
+        )
+
+
+def test_group_from_remote_url_treats_hybrid_scp_ssh_string_as_scp_style():
+    """A string like `user@host:ssh://group/repo.git` must not be routed into
+    the urlsplit() branch just because it *contains* "://" somewhere — git
+    itself disambiguates by what precedes the first ":", so this is SCP-style
+    with destination "user@host:ssh" (an invalid/unreachable host git would
+    itself refuse), not scheme://host/path. A loose `"://" in remote_url`
+    substring check would have misclassified it into the urlsplit() branch,
+    which dumps the whole string into `.path` and silently produces a group
+    string that can never match `_PROTECTED_GROUP` — even if some future
+    accident of parsing made it collide, it's the *wrong* branch. The anchored
+    check must route it through the drop-last-segment SCP-style path instead,
+    yielding "ssh://lightwell/lightwell-builds" (not the bare
+    "lightwell/lightwell-builds" group, so it correctly does not match
+    _PROTECTED_GROUP either way — but for the right reason, via the right
+    branch).
+    """
+    from taisce_cuan.source.mirror import _group_from_remote_url
+
+    resolved = _group_from_remote_url(
+        "user@host:ssh://lightwell/lightwell-builds/repo.git"
+    )
+    assert resolved == "ssh://lightwell/lightwell-builds"
+
+
+def test_publisher_allows_hybrid_scp_ssh_remote_url_without_raising():
+    # Black-box companion to the test above: construction must not raise for
+    # this hybrid string (it's neither pointed at the real protected group,
+    # nor one of the fail-closed "unrecognized" shapes).
+    publisher = GitMirrorPublisher(
+        forge_url="https://gitlab.cee.redhat.com",
+        group="irrelevant",
+        committer_name="bot",
+        committer_email="bot@example.com",
+        remote_url="user@host:ssh://lightwell/lightwell-builds/repo.git",
+    )
+    assert publisher.explicit_remote_url.endswith("repo.git")
+
+
+def test_publisher_override_logs_warning(caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        GitMirrorPublisher(
+            forge_url="https://gitlab.cee.redhat.com",
+            group="lightwell/lightwell-builds",
+            committer_name="bot",
+            committer_email="bot@example.com",
+            allow_lightwell_builds_write=True,
+        )
+    assert any("lightwell-builds" in r.message.lower() for r in caplog.records)
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+
 def test_git_mirror_publisher_dry_run(tmp_path: Path):
     source_file = create_sample_source(tmp_path, "sample", "0.1.0")
     workspace = tmp_path / "workspace"
