@@ -150,10 +150,7 @@ def test_publisher_blocks_protected_group_via_scp_style_remote_url():
             group="some-unrelated-group",
             committer_name="bot",
             committer_email="bot@example.com",
-            remote_url=(
-                "bot@gitlab.cee.redhat.com:lightwell/lightwell-builds/"
-                "pypi.org-foo.git"
-            ),
+            remote_url="bot@gitlab.cee.redhat.com:lightwell/lightwell-builds/pypi.org-foo.git",
         )
 
 
