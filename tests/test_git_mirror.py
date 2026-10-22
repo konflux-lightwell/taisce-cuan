@@ -182,6 +182,44 @@ def test_publisher_rejects_unparseable_remote_url():
         )
 
 
+def test_group_from_remote_url_treats_hybrid_scp_ssh_string_as_scp_style():
+    """A string like `user@host:ssh://group/repo.git` must not be routed into
+    the urlsplit() branch just because it *contains* "://" somewhere — git
+    itself disambiguates by what precedes the first ":", so this is SCP-style
+    with destination "user@host:ssh" (an invalid/unreachable host git would
+    itself refuse), not scheme://host/path. A loose `"://" in remote_url`
+    substring check would have misclassified it into the urlsplit() branch,
+    which dumps the whole string into `.path` and silently produces a group
+    string that can never match `_PROTECTED_GROUP` — even if some future
+    accident of parsing made it collide, it's the *wrong* branch. The anchored
+    check must route it through the drop-last-segment SCP-style path instead,
+    yielding "ssh://lightwell/lightwell-builds" (not the bare
+    "lightwell/lightwell-builds" group, so it correctly does not match
+    _PROTECTED_GROUP either way — but for the right reason, via the right
+    branch).
+    """
+    from taisce_cuan.source.mirror import _group_from_remote_url
+
+    resolved = _group_from_remote_url(
+        "user@host:ssh://lightwell/lightwell-builds/repo.git"
+    )
+    assert resolved == "ssh://lightwell/lightwell-builds"
+
+
+def test_publisher_allows_hybrid_scp_ssh_remote_url_without_raising():
+    # Black-box companion to the test above: construction must not raise for
+    # this hybrid string (it's neither pointed at the real protected group,
+    # nor one of the fail-closed "unrecognized" shapes).
+    publisher = GitMirrorPublisher(
+        forge_url="https://gitlab.cee.redhat.com",
+        group="irrelevant",
+        committer_name="bot",
+        committer_email="bot@example.com",
+        remote_url="user@host:ssh://lightwell/lightwell-builds/repo.git",
+    )
+    assert publisher.explicit_remote_url.endswith("repo.git")
+
+
 def test_publisher_override_logs_warning(caplog):
     import logging
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import subprocess
 import time
@@ -50,6 +51,15 @@ _PROTECTED_TAG_PATTERNS = ("baseline/*", "novel-head/*")
 
 _PROTECTED_GROUP = "lightwell/lightwell-builds"
 
+# A valid URI scheme per RFC 3986: a letter, then letters/digits/+/-/.,
+# anchored to the start of the string and immediately followed by "://".
+# Anchoring matters: a loose `"://" in remote_url` substring test would
+# misclassify a hybrid string like "user@host:ssh://group/repo.git" as
+# scheme://host/path (it contains "://"), when git itself disambiguates it
+# as SCP-style ([user@]host:path, with "user@host:ssh" as the destination)
+# because no "/" precedes the first ":".
+_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+
 
 def _is_already_protected(body: dict | None) -> bool:
     """True when a GitLab 409/422 body indicates the pattern is already protected."""
@@ -81,24 +91,32 @@ def _group_from_remote_url(remote_url: str) -> str:
     URLs:
 
     - ``scheme://host/path`` (``https://``, ``ssh://``, ``file://``, etc.) —
-      parsed with `urllib.parse.urlsplit`.
+      detected by an *anchored* scheme check (the string must start with a
+      valid URI scheme immediately followed by ``://``), then parsed with
+      `urllib.parse.urlsplit`.
     - A plain filesystem path (relative or absolute, no scheme, no colon) —
       a legitimate local git remote transport; the whole string is the path.
     - SCP-style ``[user@]host:path`` (e.g. ``bot@gitlab.example.com:group/
-      repo.git``) — no ``://``, but a ``:`` appears before the first ``/``
-      (or there is no ``/`` at all). Everything after that first ``:`` is
-      the path.
+      repo.git``) — doesn't start with a valid scheme, but a ``:`` appears
+      before the first ``/`` (or there is no ``/`` at all). Everything after
+      that first ``:`` is the path.
 
     `urllib.parse.urlsplit` alone mis-parses SCP-style syntax: with no
     ``://`` present it either swallows the entire string into `.path`
     (when a ``@`` makes the leading segment an invalid URI scheme) or
     misinterprets the host as a scheme — in both cases silently producing
     a group value that can never match a protected group, even when the
-    URL genuinely targets one. To avoid trusting an input shape we can't
+    URL genuinely targets one. The scheme check is deliberately *anchored*
+    to the start of the string rather than a loose ``"://" in remote_url``
+    substring test: git disambiguates by what precedes the first ``:``, so
+    a hybrid string like ``user@host:ssh://group/repo.git`` is SCP-style to
+    git (destination ``user@host:ssh``) even though it contains ``://``
+    later on; an unanchored check would wrongly route it to the
+    `urlsplit` branch instead. To avoid trusting an input shape we can't
     confidently interpret, anything that is neither of the three forms
     above raises `ValueError` rather than being waved through.
     """
-    if "://" in remote_url:
+    if _SCHEME_RE.match(remote_url):
         path = urllib.parse.urlsplit(remote_url).path
     elif ":" not in remote_url:
         path = remote_url
