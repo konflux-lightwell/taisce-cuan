@@ -74,6 +74,51 @@ def _is_rhtl_registry(registry: str | None) -> bool:
     return (registry or "").strip().lower() in {"rhtl", "packages.redhat.com"}
 
 
+def _group_from_remote_url(remote_url: str) -> str:
+    """Resolve the GitLab group portion implied by a git remote URL.
+
+    Recognizes three forms, matching how `git` itself interprets remote
+    URLs:
+
+    - ``scheme://host/path`` (``https://``, ``ssh://``, ``file://``, etc.) —
+      parsed with `urllib.parse.urlsplit`.
+    - A plain filesystem path (relative or absolute, no scheme, no colon) —
+      a legitimate local git remote transport; the whole string is the path.
+    - SCP-style ``[user@]host:path`` (e.g. ``bot@gitlab.example.com:group/
+      repo.git``) — no ``://``, but a ``:`` appears before the first ``/``
+      (or there is no ``/`` at all). Everything after that first ``:`` is
+      the path.
+
+    `urllib.parse.urlsplit` alone mis-parses SCP-style syntax: with no
+    ``://`` present it either swallows the entire string into `.path`
+    (when a ``@`` makes the leading segment an invalid URI scheme) or
+    misinterprets the host as a scheme — in both cases silently producing
+    a group value that can never match a protected group, even when the
+    URL genuinely targets one. To avoid trusting an input shape we can't
+    confidently interpret, anything that is neither of the three forms
+    above raises `ValueError` rather than being waved through.
+    """
+    if "://" in remote_url:
+        path = urllib.parse.urlsplit(remote_url).path
+    elif ":" not in remote_url:
+        path = remote_url
+    else:
+        first_slash = remote_url.find("/")
+        first_colon = remote_url.find(":")
+        if first_slash == -1 or first_colon < first_slash:
+            path = remote_url[first_colon + 1 :]
+        else:
+            raise ValueError(
+                f"Cannot determine the destination group from remote_url "
+                f"{remote_url!r}: unrecognized URL form (neither "
+                f"scheme://host/path, a plain filesystem path, nor "
+                f"[user@]host:path SCP syntax)."
+            )
+
+    segments = path.strip("/").split("/")
+    return "/".join(segments[:-1]).lower()
+
+
 class GitMirrorPublisher:
     """Manages Git initialization, metadata creation, and pushing to Git forges."""
 
@@ -106,9 +151,7 @@ class GitMirrorPublisher:
         resolved_group = self.group.lower()
         resolved_remote_group = None
         if self.explicit_remote_url:
-            path = urllib.parse.urlsplit(self.explicit_remote_url).path
-            segments = path.strip("/").split("/")
-            resolved_remote_group = "/".join(segments[:-1]).lower()
+            resolved_remote_group = _group_from_remote_url(self.explicit_remote_url)
 
         targets_protected_group = (
             resolved_group == _PROTECTED_GROUP

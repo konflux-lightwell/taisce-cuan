@@ -143,6 +143,45 @@ def test_publisher_allows_midstream_via_remote_url():
     assert publisher.explicit_remote_url.endswith("pypi.org-foo.git")
 
 
+def test_publisher_blocks_protected_group_via_scp_style_remote_url():
+    with pytest.raises(ValueError, match="lightwell-builds"):
+        GitMirrorPublisher(
+            forge_url="https://gitlab.cee.redhat.com",
+            group="some-unrelated-group",
+            committer_name="bot",
+            committer_email="bot@example.com",
+            remote_url=(
+                "bot@gitlab.cee.redhat.com:lightwell/lightwell-builds/"
+                "pypi.org-foo.git"
+            ),
+        )
+
+
+def test_publisher_allows_midstream_via_scp_style_remote_url():
+    publisher = GitMirrorPublisher(
+        forge_url="https://gitlab.cee.redhat.com",
+        group="irrelevant",
+        committer_name="bot",
+        committer_email="bot@example.com",
+        remote_url=(
+            "bot@gitlab.cee.redhat.com:lightwell/lightwell-builds-midstream/"
+            "pypi.org-foo.git"
+        ),
+    )
+    assert publisher.explicit_remote_url.endswith("pypi.org-foo.git")
+
+
+def test_publisher_rejects_unparseable_remote_url():
+    with pytest.raises(ValueError, match="remote_url"):
+        GitMirrorPublisher(
+            forge_url="https://gitlab.cee.redhat.com",
+            group="irrelevant",
+            committer_name="bot",
+            committer_email="bot@example.com",
+            remote_url="/tmp/weird:colon/path/repo.git",
+        )
+
+
 def test_publisher_override_logs_warning(caplog):
     import logging
 
