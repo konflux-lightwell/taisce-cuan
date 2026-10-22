@@ -80,6 +80,84 @@ def create_sample_source(
     return source_file
 
 
+def test_publisher_blocks_protected_group_without_override():
+    with pytest.raises(ValueError, match="lightwell-builds"):
+        GitMirrorPublisher(
+            forge_url="https://gitlab.cee.redhat.com",
+            group="lightwell/lightwell-builds",
+            committer_name="bot",
+            committer_email="bot@example.com",
+        )
+
+
+def test_publisher_blocks_protected_group_case_insensitive():
+    with pytest.raises(ValueError, match="lightwell-builds"):
+        GitMirrorPublisher(
+            forge_url="https://gitlab.cee.redhat.com",
+            group="Lightwell/Lightwell-Builds",
+            committer_name="bot",
+            committer_email="bot@example.com",
+        )
+
+
+def test_publisher_allows_protected_group_with_override():
+    publisher = GitMirrorPublisher(
+        forge_url="https://gitlab.cee.redhat.com",
+        group="lightwell/lightwell-builds",
+        committer_name="bot",
+        committer_email="bot@example.com",
+        allow_lightwell_builds_write=True,
+    )
+    assert publisher.group == "lightwell/lightwell-builds"
+
+
+def test_publisher_allows_unrelated_group():
+    publisher = GitMirrorPublisher(
+        forge_url="https://gitlab.cee.redhat.com",
+        group="lightwell/lightwell-builds-midstream",
+        committer_name="bot",
+        committer_email="bot@example.com",
+    )
+    assert publisher.group == "lightwell/lightwell-builds-midstream"
+
+
+def test_publisher_blocks_protected_group_via_remote_url_bypass():
+    with pytest.raises(ValueError, match="lightwell-builds"):
+        GitMirrorPublisher(
+            forge_url="https://gitlab.cee.redhat.com",
+            group="some-unrelated-group",
+            committer_name="bot",
+            committer_email="bot@example.com",
+            remote_url="https://gitlab.cee.redhat.com/lightwell/lightwell-builds/pypi.org-foo.git",
+        )
+
+
+def test_publisher_allows_midstream_via_remote_url():
+    publisher = GitMirrorPublisher(
+        forge_url="https://gitlab.cee.redhat.com",
+        group="irrelevant",
+        committer_name="bot",
+        committer_email="bot@example.com",
+        remote_url="https://gitlab.cee.redhat.com/lightwell/lightwell-builds-midstream/pypi.org-foo.git",
+    )
+    assert publisher.explicit_remote_url.endswith("pypi.org-foo.git")
+
+
+def test_publisher_override_logs_warning(caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        GitMirrorPublisher(
+            forge_url="https://gitlab.cee.redhat.com",
+            group="lightwell/lightwell-builds",
+            committer_name="bot",
+            committer_email="bot@example.com",
+            allow_lightwell_builds_write=True,
+        )
+    assert any("lightwell-builds" in r.message.lower() for r in caplog.records)
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+
 def test_git_mirror_publisher_dry_run(tmp_path: Path):
     source_file = create_sample_source(tmp_path, "sample", "0.1.0")
     workspace = tmp_path / "workspace"

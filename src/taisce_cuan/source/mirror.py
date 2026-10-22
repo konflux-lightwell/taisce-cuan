@@ -48,6 +48,8 @@ logger = logging.getLogger(__name__)
 
 _PROTECTED_TAG_PATTERNS = ("baseline/*", "novel-head/*")
 
+_PROTECTED_GROUP = "lightwell/lightwell-builds"
+
 
 def _is_already_protected(body: dict | None) -> bool:
     """True when a GitLab 409/422 body indicates the pattern is already protected."""
@@ -82,13 +84,14 @@ class GitMirrorPublisher:
     def __init__(
         self,
         forge_url: str = "https://gitlab.cee.redhat.com",
-        group: str = "lightwell/lightwell-builds",
+        group: str = "",
         auth_token: str | None = None,
         username: str = "oauth2",
         committer_name: str = "taisce-cuan bot",
         committer_email: str = "lightwell@redhat.com",
         remote_url: str | None = None,
         tag_protection_user_ids: list[int] | None = None,
+        allow_lightwell_builds_write: bool = False,
     ):
         self.forge_url = forge_url.rstrip("/")
         self.group = group.strip("/")
@@ -98,6 +101,32 @@ class GitMirrorPublisher:
         self.committer_email = committer_email
         self.explicit_remote_url = remote_url
         self.tag_protection_user_ids: list[int] = tag_protection_user_ids or []
+        self.allow_lightwell_builds_write = allow_lightwell_builds_write
+
+        resolved_group = self.group.lower()
+        resolved_remote_group = None
+        if self.explicit_remote_url:
+            path = urllib.parse.urlsplit(self.explicit_remote_url).path
+            segments = path.strip("/").split("/")
+            resolved_remote_group = "/".join(segments[:-1]).lower()
+
+        targets_protected_group = (
+            resolved_group == _PROTECTED_GROUP
+            or resolved_remote_group == _PROTECTED_GROUP
+        )
+        if targets_protected_group:
+            if not self.allow_lightwell_builds_write:
+                raise ValueError(
+                    f"Refusing to publish to the protected group "
+                    f"{_PROTECTED_GROUP!r}: this group is reserved for a "
+                    f"separate, already-authorized writer. Pass "
+                    f"allow_lightwell_builds_write=True to override explicitly."
+                )
+            logger.warning(
+                "Publishing to protected group %r with allow_lightwell_builds_write "
+                "override explicitly set",
+                _PROTECTED_GROUP,
+            )
 
     def _gitlab_get_project(
         self, client: httpx.Client, encoded_project: str, headers: dict
