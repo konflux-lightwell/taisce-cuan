@@ -311,6 +311,15 @@ def create_parser() -> argparse.ArgumentParser:
         help="Comma-separated list of GitLab user IDs allowed to create protected tags",
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--allow-lightwell-builds-write",
+        default="false",
+        dest="allow_lightwell_builds_write",
+        help=(
+            "Explicitly allow pushing to the protected lightwell-builds group "
+            "(exceptional use only; string 'true'/'false')"
+        ),
+    )
     return parser
 
 
@@ -363,9 +372,14 @@ def main(argv: list[str] | None = None) -> int:
     group = args.group or args.gitlab_group
     logger.info("Target forge: %s / %s", forge_url, group)
 
+    allow_lightwell_builds_write = (
+        args.allow_lightwell_builds_write.strip().lower() == "true"
+    )
+
     publisher_kwargs: dict = {
         "committer_name": args.committer_name,
         "committer_email": args.committer_email,
+        "allow_lightwell_builds_write": allow_lightwell_builds_write,
     }
     if forge_url:
         publisher_kwargs["forge_url"] = forge_url
@@ -387,8 +401,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         logger.info("Dry-run mode: git push will be skipped")
 
-    publisher = GitMirrorPublisher(**publisher_kwargs)
-
     with resolve_public_key(signing_secret_dir) as public_key:
         if public_key:
             logger.info("Public verification key: %s", public_key)
@@ -397,6 +409,7 @@ def main(argv: list[str] | None = None) -> int:
                 "No public key configured; RHTL provenance verification will be skipped"
             )
         try:
+            publisher = GitMirrorPublisher(**publisher_kwargs)
             tag_name = publisher.publish_source(
                 source_path=source_path,
                 package=package,

@@ -153,6 +153,14 @@ def create_parser() -> argparse.ArgumentParser:
     push_parser.add_argument(
         "--dry-run", action="store_true", help="Do not push to remote"
     )
+    push_parser.add_argument(
+        "--allow-lightwell-builds-write",
+        action="store_true",
+        help=(
+            "Explicitly allow pushing to the protected lightwell-builds group "
+            "(exceptional use only)"
+        ),
+    )
 
     return parser
 
@@ -203,17 +211,17 @@ def handle_push(args: argparse.Namespace) -> int:
         int(x.strip()) for x in args.tag_protection_user_ids.split(",") if x.strip()
     ]
 
-    publisher = GitMirrorPublisher(
-        forge_url=args.forge_url,
-        group=args.group,
-        auth_token=args.auth_token,
-        committer_name=args.committer_name,
-        committer_email=args.committer_email,
-        remote_url=args.remote_url,
-        tag_protection_user_ids=tag_protection_user_ids,
-    )
-
     try:
+        publisher = GitMirrorPublisher(
+            forge_url=args.forge_url,
+            group=args.group,
+            auth_token=args.auth_token,
+            committer_name=args.committer_name,
+            committer_email=args.committer_email,
+            remote_url=args.remote_url,
+            tag_protection_user_ids=tag_protection_user_ids,
+            allow_lightwell_builds_write=args.allow_lightwell_builds_write,
+        )
         tag_name = publisher.publish_source(
             source_path=source_path,
             package=package,
