@@ -1,3 +1,6 @@
+import gzip
+import hashlib
+import io
 import json
 import shutil
 import subprocess
@@ -205,6 +208,100 @@ def test_overwrite_protection_different_content(tmp_path: Path):
             workspace_dir=workspace,
             dry_run=True,
         )
+
+
+@pytest.mark.parametrize(
+    "change", ["gzip-time", "gzip-compression", "tar-metadata", "tar-content"]
+)
+def test_repacked_archive_from_fresh_workspace(tmp_path: Path, change: str):
+    source = create_sample_source(tmp_path, "repacked", "1.0.0")
+    remote = tmp_path / "mirror.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
+    publisher = GitMirrorPublisher(remote_url=str(remote))
+    tag = publisher.publish_source(source, "repacked", "1.0.0", tmp_path / "first")
+    refs_before = subprocess.check_output(["git", "show-ref"], cwd=remote)
+    metadata_before = subprocess.check_output(
+        ["git", "show", f"{tag}:.lightwell/metadata.json"], cwd=remote
+    )
+    archive_before = source.read_bytes()
+    tar_bytes = gzip.decompress(archive_before)
+    if change.startswith("tar-"):
+        output = io.BytesIO()
+        with (
+            tarfile.open(fileobj=io.BytesIO(tar_bytes)) as original,
+            tarfile.open(fileobj=output, mode="w") as updated,
+        ):
+            for member in original:
+                if change == "tar-metadata":
+                    member.mtime += 1
+                content = original.extractfile(member) if member.isfile() else None
+                if change == "tar-content" and content is not None:
+                    data = content.read() + b"\n# changed source\n"
+                    member.size = len(data)
+                    content = io.BytesIO(data)
+                updated.addfile(member, content)
+        tar_bytes = output.getvalue()
+    mtime = int.from_bytes(archive_before[4:8], "little") + 1
+    source.write_bytes(
+        gzip.compress(
+            tar_bytes,
+            compresslevel=1 if change == "gzip-compression" else 9,
+            mtime=mtime,
+        )
+    )
+    assert source.read_bytes() != archive_before
+    transformation_path = source.parent / "sdist-transformation.json"
+    transformation = json.loads(transformation_path.read_text())
+    transformation["output"]["sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
+    transformation_path.write_text(json.dumps(transformation))
+
+    with patch("taisce_cuan.source.mirror.attest_source_mirror") as attest:
+        if change.startswith("gzip-"):
+            assert (
+                publisher.publish_source(
+                    source, "repacked", "1.0.0", tmp_path / "retry"
+                )
+                == tag
+            )
+        else:
+            with pytest.raises(ValueError, match="different content"):
+                publisher.publish_source(
+                    source, "repacked", "1.0.0", tmp_path / "retry"
+                )
+        attest.assert_not_called()
+    assert subprocess.check_output(["git", "show-ref"], cwd=remote) == refs_before
+    assert (
+        subprocess.check_output(
+            ["git", "show", f"{tag}:.lightwell/metadata.json"], cwd=remote
+        )
+        == metadata_before
+    )
+    assert (
+        subprocess.check_output(
+            ["git", "show", f"{tag}:.lightwell/{source.name}"], cwd=remote
+        )
+        == archive_before
+    )
+
+
+@pytest.mark.parametrize("stored", [None, b"corrupt", gzip.compress(b"wrong tar")])
+def test_tar_fallback_rejects_missing_or_unbound_archive(tmp_path: Path, stored):
+    source = create_sample_source(tmp_path, "unbound", "1.0.0")
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher()
+    tag = publisher.publish_source(source, "unbound", "1.0.0", workspace, dry_run=True)
+    repo = workspace / "pypi.org-unbound"
+    archive = repo / ".lightwell" / source.name
+    if stored is None:
+        archive.unlink()
+    else:
+        archive.write_bytes(stored)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "broken stored archive"], cwd=repo, check=True
+    )
+    subprocess.run(["git", "tag", "-f", tag], cwd=repo, check=True)
+    assert not publisher.check_existing_tag_tar_content(repo, tag, source)
 
 
 def test_each_version_seeds_a_rootless_stream_branch(tmp_path: Path):
