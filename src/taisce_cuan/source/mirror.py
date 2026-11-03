@@ -16,12 +16,16 @@ limitations under the License.
 
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
 import logging
 import shutil
 import subprocess
+import tempfile
 import time
 import urllib.parse
+import zlib
 from pathlib import Path
 
 import httpx
@@ -316,6 +320,84 @@ class GitMirrorPublisher:
             logger.debug(f"Error checking existing tag content for {tag_name}: {e}")
         return False
 
+    def _existing_tag_archive_identity(
+        self, repo_dir: Path, tag_name: str
+    ) -> tuple[str, str]:
+        """Read the stored archive filename and SHA-256 from the tag's metadata."""
+        metadata = json.loads(
+            subprocess.check_output(
+                ["git", "show", f"{tag_name}:.lightwell/metadata.json"],
+                cwd=repo_dir,
+                stderr=subprocess.PIPE,
+            )
+        )
+        subjects = metadata["subject"]
+        if not isinstance(subjects, list) or len(subjects) != 1:
+            raise ValueError("Expected exactly one archive subject")
+        name = subjects[0]["name"]
+        digest = subjects[0]["digest"]["sha256"]
+        if (
+            not isinstance(name, str)
+            or Path(name).name != name
+            or not name.endswith(".tar.gz")
+            or not isinstance(digest, str)
+        ):
+            raise ValueError("Expected a .tar.gz filename and SHA-256 digest")
+        return name, digest.lower()
+
+    def _existing_tag_tar_sha256(self, repo_dir: Path, tag_name: str) -> bytes:
+        """Verify the stored archive's digest, then hash its decompressed tar bytes."""
+        name, digest = self._existing_tag_archive_identity(repo_dir, tag_name)
+        # Stream the Git blob to disk rather than buffering large archives.
+        with tempfile.TemporaryFile() as stored:
+            subprocess.run(
+                ["git", "show", f"{tag_name}:.lightwell/{name}"],
+                cwd=repo_dir,
+                stdout=stored,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            stored.seek(0)
+            # Trust the stored archive only if its recorded digest matches.
+            if hashlib.file_digest(stored, "sha256").hexdigest() != digest:
+                raise ValueError("Stored archive does not match its recorded SHA-256")
+            stored.seek(0)
+            with gzip.GzipFile(fileobj=stored, mode="rb") as stream:
+                return hashlib.file_digest(stream, "sha256").digest()
+
+    def check_existing_tag_tar_content(
+        self, repo_dir: Path, tag_name: str, source_path: Path
+    ) -> bool:
+        """Return True when both archives contain exactly the same tar bytes.
+
+        Read the published .tar.gz archive from the existing Git tag and check
+        that its SHA-256 matches the tag's metadata. Then decompress both archives
+        and compare their SHA-256 hashes. Gzip timestamps and compression settings
+        may differ, but tar metadata, file order, and file contents must match.
+
+        Return False if the stored evidence is missing, invalid, or different.
+        This check does not modify either archive or the existing Git tag.
+        """
+        if not source_path.name.endswith(".tar.gz"):
+            return False
+        try:
+            stored_tar_sha256 = self._existing_tag_tar_sha256(repo_dir, tag_name)
+            # Ignore gzip headers and compression; compare every tar byte.
+            with gzip.open(source_path, "rb") as stream:
+                incoming_tar_sha256 = hashlib.file_digest(stream, "sha256").digest()
+            return stored_tar_sha256 == incoming_tar_sha256
+        except (
+            OSError,
+            EOFError,
+            ValueError,
+            KeyError,
+            TypeError,
+            subprocess.CalledProcessError,
+            zlib.error,
+        ) as exc:
+            logger.debug("Cannot compare tar content for %s: %s", tag_name, exc)
+            return False
+
     def sign_attestation(
         self,
         metadata: IngestionMetadata,
@@ -457,10 +539,20 @@ class GitMirrorPublisher:
         target_branch = f"stream/{request.version}"
 
         if tag_name in existing_tag_names:
-            if self.check_existing_tag_content(repo_dir, tag_name, source_sha256):
+            exact_match = self.check_existing_tag_content(
+                repo_dir, tag_name, source_sha256
+            )
+            tar_match = not exact_match and self.check_existing_tag_tar_content(
+                repo_dir, tag_name, request.source_path
+            )
+            if exact_match or tar_match:
                 logger.info(
-                    f"Tag {tag_name} already exists with identical SHA-256 "
-                    f"({source_sha256}). Nothing to do."
+                    "Tag %s already exists with %s. Nothing to do; preserving "
+                    "the existing archive and provenance.",
+                    tag_name,
+                    f"identical SHA-256 ({source_sha256})"
+                    if exact_match
+                    else "identical decompressed tar content (gzip bytes differ)",
                 )
                 return PublishSourceResult(
                     tag_name=tag_name,
