@@ -434,6 +434,40 @@ def test_rhtl_pep740_adaptation_preserves_base64_and_rejects_malformed(tmp_path:
         adapt_rhtl_pep740(raw, output)
 
 
+@pytest.mark.parametrize("configured_limit", [None, "256MiB"])
+def test_verify_large_blob_attestation_size_limit(
+    monkeypatch, tmp_path, configured_limit
+):
+    source = tmp_path / "large.tar.gz"
+    size = 455853083
+    with source.open("wb") as stream:
+        stream.truncate(size)
+    key = tmp_path / "key.pub"
+    key.write_text("public")
+    monkeypatch.setenv("PRESERVED_SETTING", "value")
+    if configured_limit is None:
+        monkeypatch.delenv("COSIGN_MAX_ATTACHMENT_SIZE", raising=False)
+    else:
+        monkeypatch.setenv("COSIGN_MAX_ATTACHMENT_SIZE", configured_limit)
+    monkeypatch.setattr(
+        "taisce_cuan.provenance.verify.shutil.which", lambda _: "/bin/cosign"
+    )
+    captured = {}
+
+    def run(command, **kwargs):
+        captured.update(command=command, **kwargs)
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr("taisce_cuan.provenance.verify.subprocess.run", run)
+    verify_blob_attestation(source, tmp_path / "signature.json", str(key))
+    assert captured["env"]["COSIGN_MAX_ATTACHMENT_SIZE"] == (
+        configured_limit or str(size)
+    )
+    assert captured["env"]["PRESERVED_SETTING"] == "value"
+    assert captured["command"][-1] == str(source)
+    assert "--check-claims=false" not in captured["command"]
+
+
 def test_verify_blob_attestation_targets_acquired_and_never_resigns(
     monkeypatch, tmp_path: Path
 ):
