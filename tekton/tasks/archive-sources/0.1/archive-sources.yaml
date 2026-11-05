@@ -186,7 +186,7 @@ spec:
       image: quay.io/light-castle/taisce-cuan:latest
       computeResources:
         limits:
-          memory: 1Gi
+          memory: 2Gi
           cpu: 500m
         requests:
           memory: 256Mi
