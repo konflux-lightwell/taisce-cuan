@@ -46,6 +46,7 @@ from taisce_cuan.provenance.verify import (
     verify_bundle_attestation,
 )
 from taisce_cuan.sdist import canonicalize_name, compute_sha256
+from taisce_cuan.source.git_source import ClonedGitSource
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +187,73 @@ def build_ingestion_metadata(
                 ),
             ),
         ),
+    )
+
+
+def build_git_ingestion_metadata(
+    cloned: ClonedGitSource,
+    repo_name: str,
+    source_sha256: str,
+    *,
+    timestamp: datetime.datetime | None = None,
+) -> IngestionMetadata:
+    """
+    Build IngestionMetadata from a cloned git source.
+    Sets canonical_source_sha to the resolved git commit SHA.
+    """
+    canonical = canonicalize_name(cloned.package)
+    now = timestamp or datetime.datetime.now(datetime.UTC)
+    now_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Subject is the archived git source tree
+    subject_filename = f"{canonical}-{cloned.version}.tar"
+    subjects = [
+        Subject(
+            name=subject_filename,
+            digest={"sha256": source_sha256},
+        )
+    ]
+
+    # Resolved dependency binding the upstream git source
+    resolved_deps = [
+        ResolvedDependency(
+            name=cloned.upstream_url,
+            uri=cloned.upstream_url,
+            digest={"gitCommit": cloned.resolved_sha},
+            annotations={"role": "upstream-git-source", "ref": cloned.ref},
+        )
+    ]
+
+    note = "Unsigned SLSA Build Provenance inventory (git-source ingestion)."
+
+    return IngestionMetadata(
+        subject=subjects,
+        predicate=Predicate(
+            buildDefinition=BuildDefinition(
+                externalParameters=ExternalParameters(
+                    package=cloned.package,
+                    canonical_name=canonical,
+                    version=cloned.version,
+                    upstream_registry="git",
+                ),
+                resolvedDependencies=resolved_deps,
+            ),
+            runDetails=RunDetails(
+                builder=Builder(),
+                metadata=RunDetailsMetadata(
+                    startedOn=now_str,
+                    finishedOn=now_str,
+                    attestation_level="unsigned-inventory",
+                    note=note,
+                    lightwell_builds=LightwellBuildsInfo(
+                        repo=repo_name,
+                        source_registry_used="git",
+                    ),
+                    fromager=FromagerInfo(),
+                ),
+            ),
+        ),
+        canonical_source_sha=cloned.resolved_sha,
     )
 
 
