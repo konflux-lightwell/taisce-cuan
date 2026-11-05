@@ -17,8 +17,11 @@ limitations under the License.
 from __future__ import annotations
 
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+from taisce_cuan.sdist import compute_sha256
 
 
 @dataclass(frozen=True)
@@ -108,3 +111,62 @@ def clone_and_resolve_git_source(
         resolved_sha=resolved_sha,
         clone_dir=clone_dir,
     )
+
+
+def archive_git_source_to_dir(cloned: ClonedGitSource, dest_source_dir: Path) -> str:
+    """Write cloned.resolved_sha's tracked tree into dest_source_dir and return
+    the sha256 hex digest of the `git archive` tar bytes (a content hash,
+    reused by publish_git_source's idempotency check — see Task 5).
+
+    Args:
+        cloned: ClonedGitSource with a resolved commit SHA and clone directory.
+        dest_source_dir: Directory where the extracted source tree will be written.
+
+    Returns:
+        SHA256 hex digest (64 characters) of the tar archive bytes.
+
+    Raises:
+        RuntimeError: If git archive or extraction fails.
+    """
+    dest_source_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create a temporary tar file for hashing
+    with tempfile.NamedTemporaryFile(suffix='.tar', delete=False) as tmp_tar:
+        tar_path = Path(tmp_tar.name)
+
+    try:
+        # Create git archive tar of the resolved commit
+        try:
+            subprocess.run(
+                ["git", "archive", "--format=tar", cloned.resolved_sha],
+                cwd=cloned.clone_dir,
+                stdout=open(tar_path, 'wb'),
+                check=True,
+                stderr=subprocess.PIPE,
+            )
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(
+                f"Failed to create git archive for {cloned.resolved_sha} "
+                f"from {cloned.clone_dir}: {e.stderr.decode()}"
+            ) from e
+
+        # Extract the tar into dest_source_dir
+        try:
+            subprocess.run(
+                ["tar", "-xf", str(tar_path), "-C", str(dest_source_dir)],
+                check=True,
+                capture_output=True,
+            )
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(
+                f"Failed to extract archive to {dest_source_dir}: {e.stderr.decode()}"
+            ) from e
+
+        # Compute SHA256 of the tar file for idempotency check
+        digest = compute_sha256(tar_path)
+
+        return digest
+    finally:
+        # Clean up the temporary tar file
+        if tar_path.exists():
+            tar_path.unlink()

@@ -16,7 +16,7 @@ limitations under the License.
 
 import subprocess
 
-from taisce_cuan.source.git_source import clone_and_resolve_git_source
+from taisce_cuan.source.git_source import clone_and_resolve_git_source, archive_git_source_to_dir
 
 
 def test_resolves_annotated_tag_to_commit_sha(tmp_path, make_local_git_repo):
@@ -44,3 +44,27 @@ def test_raises_on_nonexistent_ref(tmp_path, make_local_git_repo):
     except RuntimeError as exc:
         assert "does-not-exist" in str(exc)
         assert str(upstream) in str(exc)
+
+
+def test_archive_git_source_to_dir_extracts_tree_and_returns_hash(tmp_path, make_local_git_repo):
+    upstream = make_local_git_repo(tmp_path, "griffe", "1.5.1")
+    cloned = clone_and_resolve_git_source(
+        str(upstream), "1.5.1", tmp_path / "work", package="griffe", version="1.5.1",
+    )
+    dest = tmp_path / "source"
+
+    digest = archive_git_source_to_dir(cloned, dest)
+
+    assert (dest / "pyproject.toml").exists()
+    assert not (dest / ".git").exists()
+    assert len(digest) == 64  # hex sha256
+
+
+def test_archive_git_source_to_dir_is_deterministic_for_same_commit(tmp_path, make_local_git_repo):
+    upstream = make_local_git_repo(tmp_path, "griffe", "1.5.1")
+    cloned = clone_and_resolve_git_source(
+        str(upstream), "1.5.1", tmp_path / "work", package="griffe", version="1.5.1",
+    )
+    digest_a = archive_git_source_to_dir(cloned, tmp_path / "source-a")
+    digest_b = archive_git_source_to_dir(cloned, tmp_path / "source-b")
+    assert digest_a == digest_b
