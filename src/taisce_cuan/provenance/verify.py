@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -262,6 +263,13 @@ def _run_cosign_verify(
     cosign_bin = shutil.which("cosign")
     if not cosign_bin:
         raise RuntimeError("Cosign CLI is required for attestation verification")
+    # Cosign also applies its attachment limit to the local source blob.
+    # Allow large sdists without disabling signature or subject-digest checks.
+    env = os.environ.copy()
+    env.setdefault(
+        "COSIGN_MAX_ATTACHMENT_SIZE",
+        str(max(128 * 1024 * 1024, source_file.stat().st_size)),
+    )
     result = subprocess.run(
         [
             cosign_bin,
@@ -277,6 +285,7 @@ def _run_cosign_verify(
         capture_output=True,
         text=True,
         check=False,
+        env=env,
     )
     if result.returncode != 0:
         raise RuntimeError(
