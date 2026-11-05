@@ -651,8 +651,17 @@ class GitMirrorPublisher:
             dry_run=request.dry_run,
         )
 
-        # 8. Stage, commit, tag, and atomic push
-        subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
+        # 8. Stage, commit, tag, and atomic push.
+        # Force-add only the extracted sdist tree: its own .gitignore files (or
+        # any exclude file on this host) must not drop files such as aiohttp's
+        # generated vendor/llhttp/build/ headers that its C extensions need
+        # (LWLP-4129). Everything else keeps the normal ignore rules.
+        subprocess.run(["git", "add", "--all"], cwd=repo_dir, check=True)
+        subprocess.run(
+            ["git", "add", "--all", "--force", "--", "source"],
+            cwd=repo_dir,
+            check=True,
+        )
         commit_msg = (
             f"ingest: {canonical} {request.version} from {verified.registry}"
             f"\n\nsha256: {source_sha256}"
