@@ -25,9 +25,26 @@ from taisce_cuan.source import GitMirrorPublisher
 
 
 def create_sample_source(
-    path: Path, pkg_name: str, version: str, filename: str = "", extra_content: str = ""
+    path: Path,
+    pkg_name: str,
+    version: str,
+    filename: str = "",
+    extra_content: str = "",
+    extra_files: dict[str, str] | None = None,
 ) -> Path:
-    """Create a normalized sdist with its required provenance carrier evidence."""
+    """Create a normalized sdist with its required provenance carrier evidence.
+
+    Args:
+        path: Directory that receives the carrier files.
+        pkg_name: Package name written into the sdist metadata.
+        version: Package version written into the sdist metadata.
+        filename: Optional sdist filename; defaults to ``<pkg>-<version>.tar.gz``.
+        extra_content: Optional text that makes the pyproject (and sha) unique.
+        extra_files: Optional ``{relative path: text}`` added to the sdist tree.
+
+    Returns:
+        Path to the created sdist.
+    """
     fn = filename or f"{pkg_name}-{version}.tar.gz"
     carrier_root = path / f"carrier_{pkg_name}_{version}_{extra_content or 'default'}"
     carrier_root.mkdir(parents=True, exist_ok=True)
@@ -37,6 +54,10 @@ def create_sample_source(
     (pkg_dir / "pyproject.toml").write_text(
         f"[project]\nname='{pkg_name}'\nversion='{version}'\n# {extra_content}"
     )
+    for rel_path, text in (extra_files or {}).items():
+        extra = pkg_dir / rel_path
+        extra.parent.mkdir(parents=True, exist_ok=True)
+        extra.write_text(text)
     with tarfile.open(source_file, "w:gz") as tar:
         tar.add(pkg_dir, arcname=f"{pkg_name}-{version}")
 
@@ -136,6 +157,111 @@ def test_git_mirror_publisher_dry_run(tmp_path: Path):
     ).strip()
     assert user_name == "custom bot"
     assert user_email == "custom@example.com"
+
+
+_IGNORED_FILE_XFAIL = pytest.mark.xfail(
+    strict=True, reason="LWLP-4129: git add honors the sdist's own ignore files"
+)
+
+
+@pytest.mark.parametrize(
+    "extra_files",
+    [
+        pytest.param(
+            {
+                "vendor/llhttp/.gitignore": "build/\n",
+                "vendor/llhttp/build/llhttp.h": "/* generated */\n",
+                "vendor/llhttp/build/c/llhttp.c": "/* generated */\n",
+            },
+            id="nested-gitignore-build-dir",
+            marks=_IGNORED_FILE_XFAIL,
+        ),
+        pytest.param(
+            {".gitignore": "*.c\n", "ext/generated.c": "/* generated */\n"},
+            id="root-gitignore-glob",
+            marks=_IGNORED_FILE_XFAIL,
+        ),
+    ],
+)
+def test_published_source_tree_matches_sdist_contents(
+    tmp_path: Path, extra_files: dict[str, str]
+):
+    """Commits every sdist file under source/, even ones the sdist ignores.
+
+    The cases reproduce LWLP-4129, where aiohttp's ignored
+    ``vendor/llhttp/build/`` files never reached the tree. The sdist's own
+    ``.gitignore`` files must still be committed as shipped.
+    """
+    # Arrange
+    source_file = create_sample_source(
+        tmp_path, "sample", "0.1.0", extra_files=extra_files
+    )
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com",
+        group="testgroup",
+        committer_name="bot",
+        committer_email="bot@example.com",
+    )
+
+    # Act
+    publisher.publish_source(
+        source_path=source_file,
+        package="sample",
+        version="0.1.0",
+        workspace_dir=workspace,
+        dry_run=True,
+    )
+
+    # Assert
+    committed = subprocess.check_output(
+        ["git", "ls-tree", "-r", "--name-only", "sample/0.1.0", "--", "source/"],
+        cwd=workspace / "pypi.org-sample",
+        text=True,
+    ).split()
+    expected = {f"source/{name}" for name in ["pyproject.toml", *extra_files]}
+    assert set(committed) == expected
+
+
+def test_publish_does_not_commit_ignored_files_outside_source(tmp_path: Path):
+    """Keeps host-ignored files in a reused repository out of the commit.
+
+    Only the freshly extracted sdist tree may bypass ignore rules, so a
+    leftover ``.env`` hidden by ``.git/info/exclude`` is never published.
+    """
+    # Arrange
+    source_file = create_sample_source(tmp_path, "sample", "0.1.0")
+    repo_dir = tmp_path / "workspace" / "pypi.org-sample"
+    repo_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=repo_dir, check=True)
+    for key, value in [("user.name", "bot"), ("user.email", "bot@example.com")]:
+        subprocess.run(["git", "config", key, value], cwd=repo_dir, check=True)
+    (repo_dir / ".git" / "info" / "exclude").write_text(".env\n")
+    (repo_dir / ".env").write_text("TOKEN=secret\n")
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com",
+        group="testgroup",
+        committer_name="bot",
+        committer_email="bot@example.com",
+    )
+
+    # Act
+    publisher.publish_source(
+        source_path=source_file,
+        package="sample",
+        version="0.1.0",
+        workspace_dir=tmp_path / "workspace",
+        dry_run=True,
+    )
+
+    # Assert
+    committed = subprocess.check_output(
+        ["git", "ls-tree", "-r", "--name-only", "sample/0.1.0"],
+        cwd=repo_dir,
+        text=True,
+    ).split()
+    assert ".env" not in committed
+    assert "source/pyproject.toml" in committed
 
 
 def test_idempotent_push_same_content(tmp_path: Path):
