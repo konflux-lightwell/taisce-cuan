@@ -160,11 +160,6 @@ def test_git_mirror_publisher_dry_run(tmp_path: Path):
     assert user_email == "custom@example.com"
 
 
-_IGNORED_FILE_XFAIL = pytest.mark.xfail(
-    strict=True, reason="LWLP-4129: git add honors the sdist's own ignore files"
-)
-
-
 @pytest.mark.parametrize(
     "extra_files",
     [
@@ -175,12 +170,10 @@ _IGNORED_FILE_XFAIL = pytest.mark.xfail(
                 "vendor/llhttp/build/c/llhttp.c": "/* generated */\n",
             },
             id="nested-gitignore-build-dir",
-            marks=_IGNORED_FILE_XFAIL,
         ),
         pytest.param(
             {".gitignore": "*.c\n", "ext/generated.c": "/* generated */\n"},
             id="root-gitignore-glob",
-            marks=_IGNORED_FILE_XFAIL,
         ),
     ],
 )
