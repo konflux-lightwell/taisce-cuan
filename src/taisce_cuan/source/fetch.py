@@ -26,6 +26,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from taisce_cuan.provenance import capture_source_origin
 from taisce_cuan.sdist import canonicalize_name, compute_sha256
 
 logger = logging.getLogger(__name__)
@@ -260,8 +261,6 @@ class SdistSourceFetcher:
             (root / "provenance.pep740.json").write_bytes(body)
         elif selected.registry in {"rhtl", "packages.redhat.com"}:
             (root / "provenance.pep740.json").unlink(missing_ok=True)
-
-        from taisce_cuan.provenance import capture_source_origin
 
         capture_source_origin(
             root=root,

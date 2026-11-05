@@ -24,7 +24,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from taisce_cuan.models import (
     BuildDefinition,
@@ -46,7 +46,9 @@ from taisce_cuan.provenance.verify import (
     verify_bundle_attestation,
 )
 from taisce_cuan.sdist import canonicalize_name, compute_sha256
-from taisce_cuan.source.git_source import ClonedGitSource
+
+if TYPE_CHECKING:
+    from taisce_cuan.source.git_source import ClonedGitSource
 
 logger = logging.getLogger(__name__)
 
