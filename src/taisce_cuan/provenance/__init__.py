@@ -20,6 +20,7 @@ from taisce_cuan.provenance.attest import (
     PublishSourceResult,
     attest_source_mirror,
     build_ingestion_metadata,
+    build_git_ingestion_metadata,
 )
 from taisce_cuan.provenance.source_origin import (
     ProvenanceOriginError,
@@ -56,6 +57,7 @@ __all__ = [
     "VerifiedSourceArtifact",
     "adapt_rhtl_pep740",
     "attest_source_mirror",
+    "build_git_ingestion_metadata",
     "build_ingestion_metadata",
     "capture_source_origin",
     "copy_verified_evidence",
