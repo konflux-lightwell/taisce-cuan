@@ -488,3 +488,51 @@ def test_resolve_package_version_returns_provided_values(tmp_path):
 
     assert pkg == "mypkg"
     assert ver == "1.0"
+
+
+# ---------------------------------------------------------------------------
+# --allow-lightwell-builds-write
+# ---------------------------------------------------------------------------
+
+
+def test_push_source_parser_has_allow_lightwell_builds_write_flag():
+    from taisce_cuan.tekton.push_source import create_parser
+
+    args = create_parser().parse_args(
+        [
+            "--committer-name=bot",
+            "--committer-email=bot@example.com",
+            "--allow-lightwell-builds-write=true",
+        ]
+    )
+    assert args.allow_lightwell_builds_write == "true"
+
+
+def test_push_source_passes_override_through_to_publisher(monkeypatch, tmp_path):
+    from taisce_cuan.tekton import push_source
+
+    captured = {}
+
+    class FakePublisher:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def publish_source(self, **kwargs):
+            return "fake/1.0.0"
+
+    monkeypatch.setattr(push_source, "GitMirrorPublisher", FakePublisher)
+    source = tmp_path / "pkg-1.0.0.tar.gz"
+    source.write_bytes(b"not a real archive")
+    monkeypatch.setattr(push_source, "resolve_source_path", lambda args: source)
+    monkeypatch.setattr(
+        push_source, "resolve_package_version", lambda *a, **k: ("pkg", "1.0.0")
+    )
+    push_source.main(
+        [
+            "--group=lightwell/lightwell-builds",
+            "--committer-name=bot",
+            "--committer-email=bot@example.com",
+            "--allow-lightwell-builds-write=true",
+        ]
+    )
+    assert captured["allow_lightwell_builds_write"] is True
