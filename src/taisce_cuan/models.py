@@ -122,3 +122,4 @@ class IngestionMetadata(BaseModel):
     predicateType: str = "https://slsa.dev/provenance/v1"
     subject: list[Subject]
     predicate: Predicate
+    canonical_source_sha: str | None = None

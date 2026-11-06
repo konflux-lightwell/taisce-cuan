@@ -27,6 +27,7 @@ import pytest
 from taisce_cuan.provenance.attest import (
     CosignAttestationSigner,
     attest_source_mirror,
+    build_git_ingestion_metadata,
     build_ingestion_metadata,
 )
 from taisce_cuan.provenance.verify import (
@@ -37,6 +38,7 @@ from taisce_cuan.source import (
     AcquiredSourceArtifact,
     NormalizedSourceArtifact,
 )
+from taisce_cuan.source.git_source import ClonedGitSource
 
 
 def make_dummy_verified(
@@ -230,3 +232,26 @@ def test_attest_source_mirror_pypi_vs_rhtl(
     assert (lightwell_rhtl / "metadata.json").exists()
     assert (lightwell_rhtl / "metadata.dsse.json").exists()
     assert not (lightwell_rhtl / "provenance.dsse.json").exists()
+
+
+def test_build_git_ingestion_metadata_sets_canonical_source_sha(tmp_path):
+    cloned = ClonedGitSource(
+        package="griffe",
+        version="1.5.1",
+        upstream_url="https://github.com/mkdocstrings/griffe.git",
+        ref="1.5.1",
+        resolved_sha="f" * 40,
+        clone_dir=tmp_path,
+    )
+
+    metadata = build_git_ingestion_metadata(cloned, "pypi.org-griffe", "a" * 64)
+
+    assert metadata.canonical_source_sha == "f" * 40
+    assert (
+        metadata.predicate.buildDefinition.externalParameters.upstream_registry == "git"
+    )
+    assert metadata.subject[0].digest["sha256"] == "a" * 64
+    assert (
+        metadata.predicate.runDetails.metadata.lightwell_builds.source_registry_used
+        == "git"
+    )

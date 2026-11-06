@@ -22,6 +22,7 @@ import os
 import sys
 from pathlib import Path
 
+from taisce_cuan.provenance.attest import PublishGitSourceRequest
 from taisce_cuan.sdist import inspect_sdist_metadata
 from taisce_cuan.source import GitMirrorPublisher, SdistSourceFetcher
 
@@ -154,6 +155,63 @@ def create_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="Do not push to remote"
     )
 
+    # push-git-source command
+    push_git_source_parser = subparsers.add_parser(
+        "push-git-source",
+        help="Mirror a git-sourced package to Git forge with pinned commit SHA",
+    )
+    push_git_source_parser.add_argument(
+        "--upstream-url", required=True, help="Upstream git repository URL"
+    )
+    push_git_source_parser.add_argument(
+        "--ref", required=True, help="Git ref (tag, branch, or commit SHA) to mirror"
+    )
+    push_git_source_parser.add_argument(
+        "--package", required=True, help="Package name (e.g. griffe)"
+    )
+    push_git_source_parser.add_argument(
+        "--version", required=True, help="Package version (e.g. 2.3.2)"
+    )
+    push_git_source_parser.add_argument(
+        "--workspace-dir",
+        "-w",
+        default="/tmp/taisce-work",
+        help="Working directory for git repo",
+    )
+    push_git_source_parser.add_argument(
+        "--forge-url", "--gitlab-url", required=True, help="Git forge base URL"
+    )
+    push_git_source_parser.add_argument(
+        "--group", required=True, help="Target group or organization on the forge"
+    )
+    push_git_source_parser.add_argument(
+        "--remote-url",
+        default=os.getenv("GIT_REMOTE_URL"),
+        help="Explicit full remote Git repository URL",
+    )
+    push_git_source_parser.add_argument(
+        "--auth-token",
+        default=os.getenv("GITLAB_TOKEN") or os.getenv("GIT_AUTH_TOKEN"),
+        help="Git forge access token",
+    )
+    push_git_source_parser.add_argument(
+        "--committer-name", required=True, help="Git author and committer name"
+    )
+    push_git_source_parser.add_argument(
+        "--committer-email", required=True, help="Git author and committer email"
+    )
+    push_git_source_parser.add_argument(
+        "--tag-protection-user-ids",
+        default=os.getenv("TAG_PROTECTION_USER_IDS", ""),
+        help=(
+            "Comma-separated list of GitLab user IDs allowed to create protected tags "
+            "(e.g. '11111,22222')"
+        ),
+    )
+    push_git_source_parser.add_argument(
+        "--dry-run", action="store_true", help="Do not push to remote"
+    )
+
     return parser
 
 
@@ -232,6 +290,42 @@ def handle_push(args: argparse.Namespace) -> int:
         return 1
 
 
+def handle_push_git_source(args: argparse.Namespace) -> int:
+    tag_protection_user_ids = [
+        int(x.strip()) for x in args.tag_protection_user_ids.split(",") if x.strip()
+    ]
+
+    publisher = GitMirrorPublisher(
+        forge_url=args.forge_url,
+        group=args.group,
+        auth_token=args.auth_token,
+        committer_name=args.committer_name,
+        committer_email=args.committer_email,
+        remote_url=args.remote_url,
+        tag_protection_user_ids=tag_protection_user_ids,
+    )
+
+    request = PublishGitSourceRequest(
+        upstream_url=args.upstream_url,
+        ref=args.ref,
+        package=args.package,
+        version=args.version,
+        workspace_dir=Path(args.workspace_dir),
+        dry_run=args.dry_run,
+    )
+
+    try:
+        result = publisher.publish_git_source(request)
+        logger.info(
+            f"Successfully published {args.package} {args.version} "
+            f"with tag {result.tag_name}"
+        )
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to publish {args.package} {args.version}: {e}")
+        return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = create_parser()
     args = parser.parse_args(argv)
@@ -240,6 +334,8 @@ def main(argv: list[str] | None = None) -> int:
         return handle_fetch(args)
     elif args.command == "push":
         return handle_push(args)
+    elif args.command == "push-git-source":
+        return handle_push_git_source(args)
     return 0
 
 
