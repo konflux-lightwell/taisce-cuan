@@ -44,6 +44,7 @@ class ProvenanceVerificationError(ValueError):
 class SourceRoute(StrEnum):
     PYPI = "pypi"
     RHTL = "rhtl"
+    GIT = "git"
 
 
 @dataclass(frozen=True)
