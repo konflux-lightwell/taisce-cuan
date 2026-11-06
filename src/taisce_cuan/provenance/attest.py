@@ -70,6 +70,18 @@ class PublishSourceRequest:
 
 
 @dataclass(frozen=True)
+class PublishGitSourceRequest:
+    """Typed input for git-source mirror publication."""
+
+    upstream_url: str
+    ref: str
+    package: str
+    version: str
+    workspace_dir: Path
+    dry_run: bool = False
+
+
+@dataclass(frozen=True)
 class PublishSourceResult:
     """Typed result of source mirror publication."""
 

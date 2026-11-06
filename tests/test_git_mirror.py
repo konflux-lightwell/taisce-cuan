@@ -21,6 +21,7 @@ from taisce_cuan.models import (
     RunDetailsMetadata,
     Subject,
 )
+from taisce_cuan.provenance.attest import PublishGitSourceRequest
 from taisce_cuan.source import GitMirrorPublisher
 
 
@@ -1519,3 +1520,94 @@ def test_ensure_remote_project_protect_already_exists_is_noop():
         url = publisher.ensure_remote_project("repo")
 
     assert url == "https://gitlab.example.com/group/repo.git"
+
+
+def test_publish_git_source_dry_run_writes_pin(tmp_path, make_local_git_repo):
+    upstream = make_local_git_repo(tmp_path, "griffe", "1.5.1")
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(forge_url="https://forge.example.com", group="testgroup")
+
+    result = publisher.publish_git_source(
+        PublishGitSourceRequest(
+            upstream_url=str(upstream), ref="1.5.1", package="griffe", version="1.5.1",
+            workspace_dir=workspace, dry_run=True,
+        )
+    )
+
+    assert result.tag_name == "griffe/1.5.1"
+    repo_dir = workspace / "pypi.org-griffe"
+    meta = json.loads((repo_dir / ".lightwell" / "metadata.json").read_text())
+    import subprocess
+    expected_sha = subprocess.check_output(
+        ["git", "rev-parse", "1.5.1^{commit}"], cwd=upstream, text=True
+    ).strip()
+    assert meta["canonical_source_sha"] == expected_sha
+
+    canonical_commit = subprocess.check_output(
+        ["git", "rev-parse", "griffe/1.5.1^{commit}"], cwd=repo_dir, text=True
+    ).strip()
+    baseline_commit = subprocess.check_output(
+        ["git", "rev-parse", "baseline/1.5.1^{commit}"], cwd=repo_dir, text=True
+    ).strip()
+    assert canonical_commit == baseline_commit
+
+
+def test_publish_git_source_is_idempotent(tmp_path, make_local_git_repo):
+    upstream = make_local_git_repo(tmp_path, "griffe", "1.5.1")
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(forge_url="https://forge.example.com", group="testgroup")
+    request = PublishGitSourceRequest(
+        upstream_url=str(upstream), ref="1.5.1", package="griffe", version="1.5.1",
+        workspace_dir=workspace, dry_run=True,
+    )
+
+    publisher.publish_git_source(request)
+    result = publisher.publish_git_source(request)
+
+    assert result.disposition == "already-present"
+
+
+def test_publish_git_source_refuses_to_overwrite_moved_ref(tmp_path, make_local_git_repo):
+    upstream = make_local_git_repo(tmp_path, "griffe", "1.5.1")
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(forge_url="https://forge.example.com", group="testgroup")
+    request = PublishGitSourceRequest(
+        upstream_url=str(upstream), ref="1.5.1", package="griffe", version="1.5.1",
+        workspace_dir=workspace, dry_run=True,
+    )
+    publisher.publish_git_source(request)
+
+    # Simulate the upstream tag moving to a new commit
+    import subprocess
+    (upstream / "pyproject.toml").write_text("[project]\nname='griffe'\nversion='1.5.1'\n# moved\n")
+    subprocess.run(["git", "add", "-A"], cwd=upstream, check=True)
+    subprocess.run(["git", "commit", "-m", "moved", "--quiet"], cwd=upstream, check=True)
+    subprocess.run(["git", "tag", "-f", "-a", "1.5.1", "-m", "moved"], cwd=upstream, check=True)
+
+    try:
+        publisher.publish_git_source(request)
+        raise AssertionError("expected ValueError")
+    except ValueError:
+        pass
+
+
+def test_publish_git_source_canonicalizes_package_name_for_repo_and_tag(tmp_path, make_local_git_repo):
+    """A package name with non-canonical casing/separators (e.g. Flask-WTF) must
+    produce the same canonicalized repo name and tag that canonicalize_name()
+    gives sdist packages, since that is what balor-fianna resolves against."""
+    upstream = make_local_git_repo(tmp_path, "Flask_WTF", "1.3.0", tag="1.3.0")
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(forge_url="https://forge.example.com", group="testgroup")
+
+    result = publisher.publish_git_source(
+        PublishGitSourceRequest(
+            upstream_url=str(upstream), ref="1.3.0", package="Flask_WTF", version="1.3.0",
+            workspace_dir=workspace, dry_run=True,
+        )
+    )
+
+    from taisce_cuan.sdist import canonicalize_name
+    canonical = canonicalize_name("Flask_WTF")
+    assert result.tag_name == f"{canonical}/1.3.0"
+    assert result.repo_name == f"pypi.org-{canonical}"
+    assert (workspace / f"pypi.org-{canonical}").exists()
