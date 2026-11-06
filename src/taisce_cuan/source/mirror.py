@@ -27,6 +27,7 @@ import time
 import urllib.parse
 import zlib
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 from packaging.version import InvalidVersion, Version
@@ -756,21 +757,22 @@ class GitMirrorPublisher:
 
         # 1. Clone upstream, resolve ref -> commit SHA, and archive that
         # commit's tree to a scratch directory to compute a content hash for
-        # the idempotency check below. The clone lives in a throwaway
-        # directory (not under repo_dir/request.workspace_dir) so repeated
-        # publishes of the same package+version don't collide with a clone
-        # left behind by a prior run.
-        clone_prefix = "taisce-cuan-git-clone-"
-        with tempfile.TemporaryDirectory(prefix=clone_prefix) as clone_scratch:
-            clone_workspace = Path(clone_scratch)
+        # the idempotency check below. The clone lives under workspace_dir in
+        # a unique subdirectory (not in system temp) so it benefits from the
+        # provisioned storage (PVC) rather than a small tmpfs, avoiding OOM
+        # in production. We clean up the clone directory explicitly afterward.
+        clone_scratch_dir = request.workspace_dir / f"clone-{uuid4().hex}"
+        clone_scratch_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
             cloned = clone_and_resolve_git_source(
                 request.upstream_url,
                 request.ref,
-                clone_workspace,
+                clone_scratch_dir,
                 package=request.package,
                 version=request.version,
             )
-            scratch_source_dir = clone_workspace / "archived-source"
+            scratch_source_dir = clone_scratch_dir / "archived-source"
             source_sha256 = archive_git_source_to_dir(cloned, scratch_source_dir)
 
             logger.info(
@@ -1011,6 +1013,10 @@ class GitMirrorPublisher:
                 route=SourceRoute.GIT,
                 disposition="published",
             )
+        finally:
+            # Clean up the clone directory to prevent lingering temporary files
+            # under workspace_dir (mirrors tempfile.TemporaryDirectory's cleanup behavior)
+            shutil.rmtree(clone_scratch_dir, ignore_errors=True)
 
     def publish_source(
         self,
