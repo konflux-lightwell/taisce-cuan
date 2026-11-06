@@ -187,10 +187,10 @@ spec:
       computeResources:
         limits:
           memory: 4Gi
-          cpu: 500m
+          cpu: "1"
         requests:
           memory: 256Mi
-          cpu: 50m
+          cpu: 100m
       command:
         - taisce-cuan-push-source
       args:
