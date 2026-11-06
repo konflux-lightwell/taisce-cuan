@@ -327,6 +327,36 @@ class GitMirrorPublisher:
             logger.debug(f"Error checking existing tag content for {tag_name}: {e}")
         return False
 
+    def _existing_tag_canonical_source_sha(
+        self, repo_dir: Path, tag_name: str
+    ) -> str | None:
+        """Read the stored canonical_source_sha from a git-source tag's metadata.
+
+        Used for publish_git_source's idempotency decision instead of a
+        tar-hash comparison: the commit SHA is already known and stable,
+        whereas the archive's tar bytes can drift across `git` versions or
+        (absent attribute neutralization) `.gitattributes` export-subst
+        content, producing a spuriously different sha256 for an unchanged
+        source commit.
+
+        Returns None if the tag's metadata is missing, invalid, or has no
+        canonical_source_sha field (e.g. it was published via the sdist
+        route rather than the git route).
+        """
+        try:
+            metadata = json.loads(
+                subprocess.check_output(
+                    ["git", "show", f"{tag_name}:.lightwell/metadata.json"],
+                    cwd=repo_dir,
+                    stderr=subprocess.PIPE,
+                )
+            )
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+            logger.debug("Error reading canonical_source_sha for %s: %s", tag_name, e)
+            return None
+        sha = metadata.get("canonical_source_sha")
+        return sha if isinstance(sha, str) else None
+
     def _existing_tag_archive_identity(
         self, repo_dir: Path, tag_name: str
     ) -> tuple[str, str]:
@@ -860,13 +890,14 @@ class GitMirrorPublisher:
             target_branch = f"stream/{request.version}"
 
             if tag_name in existing_tag_names:
-                if self.check_existing_tag_content(repo_dir, tag_name, source_sha256):
+                stored_sha = self._existing_tag_canonical_source_sha(repo_dir, tag_name)
+                if stored_sha == cloned.resolved_sha:
                     logger.info(
-                        "Tag %s already exists with identical content "
-                        "(SHA-256 %s). Nothing to do; preserving the existing "
-                        "archive and provenance.",
+                        "Tag %s already exists pinned to commit %s. Nothing "
+                        "to do; preserving the existing archive and "
+                        "provenance.",
                         tag_name,
-                        source_sha256,
+                        cloned.resolved_sha,
                     )
                     return PublishSourceResult(
                         tag_name=tag_name,
@@ -877,8 +908,10 @@ class GitMirrorPublisher:
                         disposition="already-present",
                     )
                 raise ValueError(
-                    f"Tag {tag_name} already exists with different content; "
-                    f"refusing to overwrite an ingested version."
+                    f"Tag {tag_name} already exists with a different "
+                    f"canonical_source_sha ({stored_sha!r} vs resolved "
+                    f"{cloned.resolved_sha!r}); refusing to overwrite an "
+                    f"ingested version."
                 )
 
             # 4. Check out the version-derived stream branch, refusing to
@@ -932,7 +965,14 @@ class GitMirrorPublisher:
             shutil.move(str(scratch_source_dir), str(source_dir))
 
             # 6. Build and write git ingestion metadata (sets
-            # canonical_source_sha to the resolved upstream commit)
+            # canonical_source_sha to the resolved upstream commit).
+            # The orphan-branch checkout + `git rm -rf .` above deletes
+            # .lightwell/ from disk (it was tracked from a prior version's
+            # commit when repo_dir/workspace_dir is reused across calls), so
+            # it must be re-created here, immediately before writing into it,
+            # rather than relying solely on the mkdir done near the top of
+            # this method.
+            lightwell_dir.mkdir(parents=True, exist_ok=True)
             metadata = build_git_ingestion_metadata(cloned, repo_name, source_sha256)
             metadata_file = lightwell_dir / "metadata.json"
             metadata_file.write_text(
@@ -1014,8 +1054,9 @@ class GitMirrorPublisher:
                 disposition="published",
             )
         finally:
-            # Clean up the clone directory to prevent lingering temporary files
-            # under workspace_dir (mirrors tempfile.TemporaryDirectory's cleanup behavior)
+            # Clean up the clone directory to prevent lingering temporary
+            # files under workspace_dir (mirrors tempfile.TemporaryDirectory's
+            # cleanup behavior)
             shutil.rmtree(clone_scratch_dir, ignore_errors=True)
 
     def publish_source(

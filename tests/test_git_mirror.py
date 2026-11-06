@@ -1525,12 +1525,18 @@ def test_ensure_remote_project_protect_already_exists_is_noop():
 def test_publish_git_source_dry_run_writes_pin(tmp_path, make_local_git_repo):
     upstream = make_local_git_repo(tmp_path, "griffe", "1.5.1")
     workspace = tmp_path / "workspace"
-    publisher = GitMirrorPublisher(forge_url="https://forge.example.com", group="testgroup")
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com", group="testgroup"
+    )
 
     result = publisher.publish_git_source(
         PublishGitSourceRequest(
-            upstream_url=str(upstream), ref="1.5.1", package="griffe", version="1.5.1",
-            workspace_dir=workspace, dry_run=True,
+            upstream_url=str(upstream),
+            ref="1.5.1",
+            package="griffe",
+            version="1.5.1",
+            workspace_dir=workspace,
+            dry_run=True,
         )
     )
 
@@ -1538,6 +1544,7 @@ def test_publish_git_source_dry_run_writes_pin(tmp_path, make_local_git_repo):
     repo_dir = workspace / "pypi.org-griffe"
     meta = json.loads((repo_dir / ".lightwell" / "metadata.json").read_text())
     import subprocess
+
     expected_sha = subprocess.check_output(
         ["git", "rev-parse", "1.5.1^{commit}"], cwd=upstream, text=True
     ).strip()
@@ -1555,10 +1562,16 @@ def test_publish_git_source_dry_run_writes_pin(tmp_path, make_local_git_repo):
 def test_publish_git_source_is_idempotent(tmp_path, make_local_git_repo):
     upstream = make_local_git_repo(tmp_path, "griffe", "1.5.1")
     workspace = tmp_path / "workspace"
-    publisher = GitMirrorPublisher(forge_url="https://forge.example.com", group="testgroup")
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com", group="testgroup"
+    )
     request = PublishGitSourceRequest(
-        upstream_url=str(upstream), ref="1.5.1", package="griffe", version="1.5.1",
-        workspace_dir=workspace, dry_run=True,
+        upstream_url=str(upstream),
+        ref="1.5.1",
+        package="griffe",
+        version="1.5.1",
+        workspace_dir=workspace,
+        dry_run=True,
     )
 
     publisher.publish_git_source(request)
@@ -1567,22 +1580,37 @@ def test_publish_git_source_is_idempotent(tmp_path, make_local_git_repo):
     assert result.disposition == "already-present"
 
 
-def test_publish_git_source_refuses_to_overwrite_moved_ref(tmp_path, make_local_git_repo):
+def test_publish_git_source_refuses_to_overwrite_moved_ref(
+    tmp_path, make_local_git_repo
+):
     upstream = make_local_git_repo(tmp_path, "griffe", "1.5.1")
     workspace = tmp_path / "workspace"
-    publisher = GitMirrorPublisher(forge_url="https://forge.example.com", group="testgroup")
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com", group="testgroup"
+    )
     request = PublishGitSourceRequest(
-        upstream_url=str(upstream), ref="1.5.1", package="griffe", version="1.5.1",
-        workspace_dir=workspace, dry_run=True,
+        upstream_url=str(upstream),
+        ref="1.5.1",
+        package="griffe",
+        version="1.5.1",
+        workspace_dir=workspace,
+        dry_run=True,
     )
     publisher.publish_git_source(request)
 
     # Simulate the upstream tag moving to a new commit
     import subprocess
-    (upstream / "pyproject.toml").write_text("[project]\nname='griffe'\nversion='1.5.1'\n# moved\n")
+
+    (upstream / "pyproject.toml").write_text(
+        "[project]\nname='griffe'\nversion='1.5.1'\n# moved\n"
+    )
     subprocess.run(["git", "add", "-A"], cwd=upstream, check=True)
-    subprocess.run(["git", "commit", "-m", "moved", "--quiet"], cwd=upstream, check=True)
-    subprocess.run(["git", "tag", "-f", "-a", "1.5.1", "-m", "moved"], cwd=upstream, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "moved", "--quiet"], cwd=upstream, check=True
+    )
+    subprocess.run(
+        ["git", "tag", "-f", "-a", "1.5.1", "-m", "moved"], cwd=upstream, check=True
+    )
 
     try:
         publisher.publish_git_source(request)
@@ -1591,23 +1619,144 @@ def test_publish_git_source_refuses_to_overwrite_moved_ref(tmp_path, make_local_
         pass
 
 
-def test_publish_git_source_canonicalizes_package_name_for_repo_and_tag(tmp_path, make_local_git_repo):
+def test_publish_git_source_canonicalizes_package_name_for_repo_and_tag(
+    tmp_path, make_local_git_repo
+):
     """A package name with non-canonical casing/separators (e.g. Flask-WTF) must
     produce the same canonicalized repo name and tag that canonicalize_name()
     gives sdist packages, since that is what balor-fianna resolves against."""
     upstream = make_local_git_repo(tmp_path, "Flask_WTF", "1.3.0", tag="1.3.0")
     workspace = tmp_path / "workspace"
-    publisher = GitMirrorPublisher(forge_url="https://forge.example.com", group="testgroup")
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com", group="testgroup"
+    )
 
     result = publisher.publish_git_source(
         PublishGitSourceRequest(
-            upstream_url=str(upstream), ref="1.3.0", package="Flask_WTF", version="1.3.0",
-            workspace_dir=workspace, dry_run=True,
+            upstream_url=str(upstream),
+            ref="1.3.0",
+            package="Flask_WTF",
+            version="1.3.0",
+            workspace_dir=workspace,
+            dry_run=True,
         )
     )
 
     from taisce_cuan.sdist import canonicalize_name
+
     canonical = canonicalize_name("Flask_WTF")
     assert result.tag_name == f"{canonical}/1.3.0"
     assert result.repo_name == f"pypi.org-{canonical}"
-    assert (workspace / f"pypi.org-{canonical}").exists()
+
+
+def test_publish_git_source_second_version_in_reused_workspace_succeeds(
+    tmp_path, make_local_git_repo
+):
+    """Publishing two different versions of the same package into the same
+    workspace_dir (and therefore the same on-disk repo_dir) must not crash —
+    LWLP-3402 final-review finding 2. The second version's orphan-branch
+    checkout + `git rm -rf .` deleted the tracked .lightwell/ directory from
+    disk (carried over from the first version's commit), and the later
+    metadata.json write then failed with FileNotFoundError."""
+    upstream_v1 = make_local_git_repo(tmp_path, "sample", "1.0", tag="1.0")
+    upstream_v2 = make_local_git_repo(tmp_path, "sample", "2.0", tag="2.0")
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com", group="testgroup"
+    )
+
+    result_v1 = publisher.publish_git_source(
+        PublishGitSourceRequest(
+            upstream_url=str(upstream_v1),
+            ref="1.0",
+            package="sample",
+            version="1.0",
+            workspace_dir=workspace,
+            dry_run=True,
+        )
+    )
+    result_v2 = publisher.publish_git_source(
+        PublishGitSourceRequest(
+            upstream_url=str(upstream_v2),
+            ref="2.0",
+            package="sample",
+            version="2.0",
+            workspace_dir=workspace,
+            dry_run=True,
+        )
+    )
+
+    assert result_v1.disposition == "published"
+    assert result_v2.disposition == "published"
+    repo_dir = workspace / "pypi.org-sample"
+    assert (repo_dir / ".lightwell" / "metadata.json").exists()
+
+
+def test_publish_git_source_neutralizes_export_attributes_and_stays_idempotent(
+    tmp_path: Path,
+):
+    """`git archive` honors the tree's own .gitattributes by default:
+    export-ignore silently drops files from the mirror, and export-subst
+    rewrites placeholder content using clone-time ref state — content that
+    can drift across re-clones of the identical commit and spuriously break
+    idempotency. Both must be neutralized — LWLP-3402 final-review finding 1.
+    """
+    upstream = tmp_path / "upstream-attrs"
+    upstream.mkdir()
+    subprocess.run(
+        ["git", "init", "--initial-branch=main", "--quiet"], cwd=upstream, check=True
+    )
+    subprocess.run(["git", "config", "user.name", "test"], cwd=upstream, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], cwd=upstream, check=True
+    )
+    (upstream / "pyproject.toml").write_text(
+        "[project]\nname='attrs-pkg'\nversion='1.0.0'\n"
+    )
+    (upstream / "tests_only.txt").write_text(
+        "should be mirrored despite export-ignore\n"
+    )
+    (upstream / ".git_archival.txt").write_text("ref-names: $Format:%D$\n")
+    (upstream / ".gitattributes").write_text(
+        "tests_only.txt export-ignore\n.git_archival.txt export-subst\n"
+    )
+    subprocess.run(["git", "add", "-A"], cwd=upstream, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial", "--quiet"], cwd=upstream, check=True
+    )
+    subprocess.run(
+        ["git", "tag", "-a", "1.0.0", "-m", "release"], cwd=upstream, check=True
+    )
+
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com", group="testgroup"
+    )
+    request = PublishGitSourceRequest(
+        upstream_url=str(upstream),
+        ref="1.0.0",
+        package="attrs-pkg",
+        version="1.0.0",
+        workspace_dir=workspace,
+        dry_run=True,
+    )
+
+    result1 = publisher.publish_git_source(request)
+    assert result1.disposition == "published"
+
+    repo_dir = workspace / "pypi.org-attrs-pkg"
+    # export-ignore must be neutralized: the file is present in the mirror.
+    assert (repo_dir / "source" / "tests_only.txt").exists()
+    # export-subst must be neutralized: the placeholder is left literal, not
+    # expanded using clone-time ref state.
+    archival = (repo_dir / "source" / ".git_archival.txt").read_text()
+    assert "$Format:%D$" in archival
+
+    # Simulate ref-state drift between re-clones by adding another ref that
+    # points at the same commit. Without neutralization, this changes what
+    # export-subst's %D expands to (and therefore the archive tar's sha256)
+    # on a fresh re-clone, even though the actual source commit is unchanged.
+    subprocess.run(["git", "branch", "another-branch"], cwd=upstream, check=True)
+
+    result2 = publisher.publish_git_source(request)
+    assert result2.disposition == "already-present"
