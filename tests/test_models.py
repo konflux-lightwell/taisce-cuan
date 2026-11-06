@@ -17,7 +17,9 @@ def _minimal_predicate() -> Predicate:
     return Predicate(
         buildDefinition=BuildDefinition(
             externalParameters=ExternalParameters(
-                package="x", canonical_name="x", version="1.0",
+                package="x",
+                canonical_name="x",
+                version="1.0",
             ),
         ),
         runDetails=RunDetails(

@@ -19,8 +19,8 @@ from taisce_cuan.provenance.attest import (
     PublishSourceRequest,
     PublishSourceResult,
     attest_source_mirror,
-    build_ingestion_metadata,
     build_git_ingestion_metadata,
+    build_ingestion_metadata,
 )
 from taisce_cuan.provenance.source_origin import (
     ProvenanceOriginError,

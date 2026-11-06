@@ -236,14 +236,22 @@ def test_attest_source_mirror_pypi_vs_rhtl(
 
 def test_build_git_ingestion_metadata_sets_canonical_source_sha(tmp_path):
     cloned = ClonedGitSource(
-        package="griffe", version="1.5.1",
+        package="griffe",
+        version="1.5.1",
         upstream_url="https://github.com/mkdocstrings/griffe.git",
-        ref="1.5.1", resolved_sha="f" * 40, clone_dir=tmp_path,
+        ref="1.5.1",
+        resolved_sha="f" * 40,
+        clone_dir=tmp_path,
     )
 
     metadata = build_git_ingestion_metadata(cloned, "pypi.org-griffe", "a" * 64)
 
     assert metadata.canonical_source_sha == "f" * 40
-    assert metadata.predicate.buildDefinition.externalParameters.upstream_registry == "git"
+    assert (
+        metadata.predicate.buildDefinition.externalParameters.upstream_registry == "git"
+    )
     assert metadata.subject[0].digest["sha256"] == "a" * 64
-    assert metadata.predicate.runDetails.metadata.lightwell_builds.source_registry_used == "git"
+    assert (
+        metadata.predicate.runDetails.metadata.lightwell_builds.source_registry_used
+        == "git"
+    )
