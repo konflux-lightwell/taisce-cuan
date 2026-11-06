@@ -201,6 +201,14 @@ def create_parser() -> argparse.ArgumentParser:
         "--committer-email", required=True, help="Git author and committer email"
     )
     push_git_source_parser.add_argument(
+        "--tag-protection-user-ids",
+        default=os.getenv("TAG_PROTECTION_USER_IDS", ""),
+        help=(
+            "Comma-separated list of GitLab user IDs allowed to create protected tags "
+            "(e.g. '11111,22222')"
+        ),
+    )
+    push_git_source_parser.add_argument(
         "--dry-run", action="store_true", help="Do not push to remote"
     )
 
@@ -283,6 +291,10 @@ def handle_push(args: argparse.Namespace) -> int:
 
 
 def handle_push_git_source(args: argparse.Namespace) -> int:
+    tag_protection_user_ids = [
+        int(x.strip()) for x in args.tag_protection_user_ids.split(",") if x.strip()
+    ]
+
     publisher = GitMirrorPublisher(
         forge_url=args.forge_url,
         group=args.group,
@@ -290,6 +302,7 @@ def handle_push_git_source(args: argparse.Namespace) -> int:
         committer_name=args.committer_name,
         committer_email=args.committer_email,
         remote_url=args.remote_url,
+        tag_protection_user_ids=tag_protection_user_ids,
     )
 
     request = PublishGitSourceRequest(
