@@ -1658,6 +1658,71 @@ def test_publish_git_source_is_idempotent(tmp_path, make_local_git_repo):
     assert result.disposition == "already-present"
 
 
+def test_publish_git_source_real_bare_remote(tmp_path: Path, make_local_git_repo):
+    """All other publish_git_source tests are dry-run. Exercise the real
+    push + the real idempotency path: a fresh workspace with no local git
+    history must learn about an already-published tag from the remote
+    (via _fetch_existing_remote_refs), not from local state. LWLP-4828
+    review item 3."""
+    remote_bare = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote_bare)], check=True)
+    remote_url = str(remote_bare.resolve())
+
+    upstream = make_local_git_repo(tmp_path, "griffe", "1.5.1")
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com",
+        group="testgroup",
+        committer_name="remote-bot",
+        committer_email="remote-bot@example.com",
+        remote_url=remote_url,
+    )
+    request = PublishGitSourceRequest(
+        upstream_url=str(upstream),
+        ref="1.5.1",
+        package="griffe",
+        version="1.5.1",
+        workspace_dir=workspace,
+        dry_run=False,
+    )
+
+    result = publisher.publish_git_source(request)
+    assert result.disposition == "published"
+
+    remote_tag_commit = subprocess.check_output(
+        ["git", "rev-parse", "refs/tags/griffe/1.5.1^{commit}"],
+        cwd=remote_bare,
+        text=True,
+    ).strip()
+    remote_baseline_commit = subprocess.check_output(
+        ["git", "rev-parse", "refs/tags/baseline/1.5.1^{commit}"],
+        cwd=remote_bare,
+        text=True,
+    ).strip()
+    remote_stream_commit = subprocess.check_output(
+        ["git", "rev-parse", "refs/heads/stream/1.5.1^{commit}"],
+        cwd=remote_bare,
+        text=True,
+    ).strip()
+    assert remote_tag_commit == remote_baseline_commit == remote_stream_commit
+
+    # Real idempotency path: a FRESH workspace (no local git history) must
+    # learn the tag already exists from the remote fetch and no-op, rather
+    # than attempting (and failing) to re-publish.
+    workspace_fresh = tmp_path / "workspace_fresh"
+    result_fresh = publisher.publish_git_source(
+        PublishGitSourceRequest(
+            upstream_url=str(upstream),
+            ref="1.5.1",
+            package="griffe",
+            version="1.5.1",
+            workspace_dir=workspace_fresh,
+            dry_run=False,
+        )
+    )
+    assert result_fresh.disposition == "already-present"
+
+
 def test_publish_git_source_refuses_to_overwrite_moved_ref(
     tmp_path, make_local_git_repo
 ):
