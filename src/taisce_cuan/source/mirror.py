@@ -499,76 +499,18 @@ class GitMirrorPublisher:
             f"to {repo_name}"
         )
 
-        # 2. Git init if repo not present
-        if not (repo_dir / ".git").exists():
-            subprocess.run(
-                ["git", "init", "--initial-branch=main"],
-                cwd=repo_dir,
-                check=True,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["git", "config", "user.name", self.committer_name],
-                cwd=repo_dir,
-                check=True,
-            )
-            subprocess.run(
-                ["git", "config", "user.email", self.committer_email],
-                cwd=repo_dir,
-                check=True,
-            )
-
-        if self.auth_token:
-            if "gitlab" in self.forge_url.lower():
-                import base64
-
-                basic_auth = base64.b64encode(
-                    f"{self.username}:{self.auth_token}".encode()
-                ).decode()
-                header = f"Authorization: Basic {basic_auth}"
-            else:
-                header = f"Authorization: Bearer {self.auth_token}"
-            subprocess.run(
-                ["git", "config", "http.extraHeader", header], cwd=repo_dir, check=True
-            )
+        # 2. Git init if repo not present, configure forge auth, and fetch
+        # existing remote refs for the idempotency and branch-advance checks
+        # below.
+        self._init_git_repo(repo_dir)
+        self._configure_git_auth(repo_dir)
 
         remote_url = (
             self.ensure_remote_project(repo_name) if not request.dry_run else None
         )
 
         if remote_url and not request.dry_run:
-            ls_res = subprocess.run(
-                ["git", "ls-remote", remote_url],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if ls_res.returncode != 0:
-                raise RuntimeError(
-                    f"Could not access remote repository {remote_url}: "
-                    f"{ls_res.stderr.strip()}"
-                )
-
-            fetch_res = subprocess.run(
-                [
-                    "git",
-                    "fetch",
-                    "--force",
-                    "--tags",
-                    remote_url,
-                    "+refs/heads/*:refs/remotes/origin/*",
-                ],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if fetch_res.returncode != 0:
-                logger.info(
-                    "Remote repository appears empty or has no matching refs; "
-                    "initializing fresh tree"
-                )
+            self._fetch_existing_remote_refs(repo_dir, remote_url)
 
         # 3. Check existing tags and idempotency / overwrite protection
         existing_tags = self.get_existing_tags(repo_dir, canonical)
@@ -607,44 +549,7 @@ class GitMirrorPublisher:
 
         # 4. Check out the version-derived stream branch, refusing to advance one
         # that already exists during ingestion.
-        exists_local = (
-            subprocess.run(
-                ["git", "rev-parse", "--verify", f"refs/heads/{target_branch}"],
-                cwd=repo_dir,
-                capture_output=True,
-            ).returncode
-            == 0
-        )
-        exists_remote = (
-            subprocess.run(
-                [
-                    "git",
-                    "rev-parse",
-                    "--verify",
-                    f"refs/remotes/origin/{target_branch}",
-                ],
-                cwd=repo_dir,
-                capture_output=True,
-            ).returncode
-            == 0
-        )
-        if exists_local:
-            raise ValueError(
-                f"Stream branch {target_branch} already exists locally; refusing "
-                f"to advance."
-            )
-        elif exists_remote:
-            raise ValueError(
-                f"Stream branch {target_branch} already exists; refusing to "
-                f"advance it during ingestion."
-            )
-
-        subprocess.run(
-            ["git", "checkout", "--orphan", target_branch], cwd=repo_dir, check=True
-        )
-        subprocess.run(
-            ["git", "rm", "-rf", "."], cwd=repo_dir, capture_output=True, check=False
-        )
+        self._checkout_orphan_stream_branch(repo_dir, target_branch)
 
         # 5. Extract source archive
         source_dir = repo_dir / "source"
@@ -690,29 +595,13 @@ class GitMirrorPublisher:
         )
 
         # 8. Stage, commit, tag, and atomic push
-        subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
         commit_msg = (
             f"ingest: {canonical} {request.version} from {verified.registry}"
             f"\n\nsha256: {source_sha256}"
         )
-        subprocess.run(["git", "commit", "-m", commit_msg], cwd=repo_dir, check=True)
-
-        subprocess.run(["git", "tag", tag_name], cwd=repo_dir, check=True)
-        logger.info(f"Tagged {tag_name} on branch {target_branch}")
-
-        baseline_tag = f"baseline/{request.version}"
-        existing_baseline = subprocess.run(
-            ["git", "tag", "--list", baseline_tag],
-            cwd=repo_dir,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-
-        tags_to_push = [tag_name]
-        if not existing_baseline:
-            subprocess.run(["git", "tag", baseline_tag], cwd=repo_dir, check=True)
-            logger.info(f"Tagged initial {baseline_tag} on branch {target_branch}")
-            tags_to_push.append(baseline_tag)
+        tags_to_push = self._commit_and_tag(
+            repo_dir, request.version, commit_msg, tag_name, target_branch
+        )
 
         if request.dry_run or not remote_url:
             logger.info("Dry-run requested; skipping git push")
@@ -725,26 +614,10 @@ class GitMirrorPublisher:
                 disposition="published",
             )
 
-        push_cmd = ["git", "push", "--atomic", remote_url, target_branch, *tags_to_push]
-
-        try:
-            subprocess.run(
-                push_cmd, cwd=repo_dir, check=True, capture_output=True, text=True
-            )
-        except subprocess.CalledProcessError as e:
-            sanitized_err = (
-                e.stderr.replace(self.auth_token, "********")
-                if self.auth_token
-                else e.stderr
-            )
-            raise RuntimeError(
-                f"Failed to push branch {target_branch} and tag {tag_name}: "
-                f"{sanitized_err}"
-            ) from None
-
-        logger.info(
-            f"Pushed {repo_name} branch {target_branch} and tag {tag_name} to remote"
+        self._push_tags(
+            repo_dir, remote_url, repo_name, target_branch, tags_to_push, tag_name
         )
+
         return PublishSourceResult(
             tag_name=tag_name,
             repo_name=repo_name,
@@ -959,29 +832,26 @@ class GitMirrorPublisher:
             public_key=request.public_key,
         )
 
-    def _commit_and_tag_git_source(
+    def _commit_and_tag(
         self,
         repo_dir: Path,
-        canonical: str,
-        request: PublishGitSourceRequest,
-        cloned: ClonedGitSource,
+        version: str,
+        commit_msg: str,
         tag_name: str,
         target_branch: str,
     ) -> list[str]:
         """Stage, commit, and tag <canonical>/<version> plus
         baseline/<version> (the latter only if not already present). Returns
-        the tag names to push."""
+        the tag names to push. Shared by both the sdist (publish()) and
+        git-source (publish_git_source()) routes -- the commit message is
+        route-specific, so callers build it."""
         subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
-        commit_msg = (
-            f"ingest: {canonical} {request.version} from git "
-            f"({cloned.upstream_url})\n\ncommit: {cloned.resolved_sha}"
-        )
         subprocess.run(["git", "commit", "-m", commit_msg], cwd=repo_dir, check=True)
 
         subprocess.run(["git", "tag", tag_name], cwd=repo_dir, check=True)
         logger.info(f"Tagged {tag_name} on branch {target_branch}")
 
-        baseline_tag = f"baseline/{request.version}"
+        baseline_tag = f"baseline/{version}"
         existing_baseline = subprocess.run(
             ["git", "tag", "--list", baseline_tag],
             cwd=repo_dir,
@@ -997,7 +867,7 @@ class GitMirrorPublisher:
 
         return tags_to_push
 
-    def _push_git_source_tags(
+    def _push_tags(
         self,
         repo_dir: Path,
         remote_url: str,
@@ -1007,7 +877,8 @@ class GitMirrorPublisher:
         tag_name: str,
     ) -> None:
         """Atomically push the stream branch and tags; raise RuntimeError
-        with sanitized stderr on failure."""
+        with sanitized stderr on failure. Shared by both the sdist and
+        git-source routes."""
         push_cmd = [
             "git",
             "push",
@@ -1120,8 +991,12 @@ class GitMirrorPublisher:
                 request,
             )
 
-            tags_to_push = self._commit_and_tag_git_source(
-                repo_dir, canonical, request, cloned, tag_name, target_branch
+            commit_msg = (
+                f"ingest: {canonical} {request.version} from git "
+                f"({cloned.upstream_url})\n\ncommit: {cloned.resolved_sha}"
+            )
+            tags_to_push = self._commit_and_tag(
+                repo_dir, request.version, commit_msg, tag_name, target_branch
             )
 
             if request.dry_run or not remote_url:
@@ -1135,7 +1010,7 @@ class GitMirrorPublisher:
                     disposition="published",
                 )
 
-            self._push_git_source_tags(
+            self._push_tags(
                 repo_dir, remote_url, repo_name, target_branch, tags_to_push, tag_name
             )
 
