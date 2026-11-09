@@ -111,3 +111,79 @@ def test_option_like_ref_is_rejected_not_misinterpreted_as_a_flag(
         raise AssertionError("expected RuntimeError")
     except RuntimeError as exc:
         assert "--orphan=x" in str(exc)
+
+
+def test_credentials_stripped_from_cloned_upstream_url(tmp_path, make_local_git_repo):
+    """upstream_url with embedded userinfo (e.g. a leaked PAT) must not
+    propagate into ClonedGitSource.upstream_url -- downstream code writes
+    that value verbatim into .lightwell/metadata.json and the mirror commit
+    message. LWLP-4828 review item 1."""
+    upstream = make_local_git_repo(tmp_path, "griffe", "1.5.1")
+    credentialed_url = f"file://user:tok3n@{upstream.resolve()}"
+
+    cloned = clone_and_resolve_git_source(
+        credentialed_url,
+        "1.5.1",
+        tmp_path / "work",
+        package="griffe",
+        version="1.5.1",
+    )
+
+    assert "tok3n" not in cloned.upstream_url
+    assert "user:tok3n@" not in cloned.upstream_url
+    assert str(upstream.resolve()) in cloned.upstream_url
+
+
+def test_credentials_stripped_from_error_text_on_failed_resolution(tmp_path):
+    """Credential redaction must also apply on the failure path -- a failed
+    clone/resolve must not leak a token into the exception text (which can
+    end up in logs). LWLP-4828 review item 1."""
+    try:
+        clone_and_resolve_git_source(
+            "https://user:supersecrettoken@127.0.0.1:1/nonexistent.git",
+            "main",
+            tmp_path / "work",
+            package="pkg",
+            version="1.0",
+        )
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        assert "supersecrettoken" not in str(exc)
+        assert "127.0.0.1" in str(exc)
+
+
+def test_resolves_non_default_branch_via_origin_fallback(tmp_path, make_local_git_repo):
+    """A plain `git clone` only creates a local ref for the default branch --
+    other branches exist only as `origin/<branch>`. clone_and_resolve_git_source
+    must still resolve a non-default branch ref, matching the CLI's documented
+    tag/branch/SHA support for --ref. LWLP-4828 review item 2."""
+    upstream = make_local_git_repo(tmp_path, "griffe", "1.5.1")
+    subprocess.run(
+        ["git", "checkout", "-b", "release-1.x"],
+        cwd=upstream,
+        check=True,
+        capture_output=True,
+    )
+    (upstream / "pyproject.toml").write_text(
+        "[project]\nname='griffe'\nversion='1.5.1'\n# on branch\n"
+    )
+    subprocess.run(["git", "add", "-A"], cwd=upstream, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "branch commit"], cwd=upstream, check=True
+    )
+    expected_sha = subprocess.check_output(
+        ["git", "rev-parse", "release-1.x^{commit}"], cwd=upstream, text=True
+    ).strip()
+    subprocess.run(
+        ["git", "checkout", "main"], cwd=upstream, check=True, capture_output=True
+    )
+
+    cloned = clone_and_resolve_git_source(
+        str(upstream),
+        "release-1.x",
+        tmp_path / "work",
+        package="griffe",
+        version="1.5.1",
+    )
+
+    assert cloned.resolved_sha == expected_sha

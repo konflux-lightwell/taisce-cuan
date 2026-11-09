@@ -22,6 +22,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from taisce_cuan.sdist import compute_sha256
 
@@ -34,6 +35,58 @@ def _no_prompt_env() -> dict[str, str]:
     env = dict(os.environ)
     env["GIT_TERMINAL_PROMPT"] = "0"
     return env
+
+
+def _redact_url_credentials(url: str) -> str:
+    """Strip embedded userinfo (e.g. `user:token@`) from a URL before it is
+    persisted to metadata, a commit message, or error/log text.
+
+    A no-op for values with no netloc userinfo to strip -- plain filesystem
+    paths and scp-style SSH refs (`git@host:path`) both parse with an empty
+    netloc, so they pass through unchanged.
+    """
+    parsed = urlsplit(url)
+    if "@" not in parsed.netloc:
+        return url
+    _, _, host = parsed.netloc.rpartition("@")
+    return urlunsplit(parsed._replace(netloc=host))
+
+
+def _resolve_ref_to_sha(ref: str, clone_dir: Path, env: dict[str, str]) -> str:
+    """Resolve `ref` to a commit SHA in a freshly-cloned repo.
+
+    A plain `git clone` fetches every branch as a remote-tracking ref
+    (`refs/remotes/origin/*`) but only checks out the default branch
+    locally (`refs/heads/<default>`), so `<ref>^{commit}` alone resolves
+    tags and SHAs (fetched in full either way) but not a non-default
+    branch. Falls back to `origin/<ref>` before giving up, so `--ref`
+    behaves for branches as advertised.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}"],
+            cwd=clone_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    except subprocess.CalledProcessError:
+        result = subprocess.run(
+            [
+                "git",
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                f"origin/{ref}^{{commit}}",
+            ],
+            cwd=clone_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    return result.stdout.strip()
 
 
 @dataclass(frozen=True)
@@ -85,6 +138,7 @@ def clone_and_resolve_git_source(
     clone_dir.parent.mkdir(parents=True, exist_ok=True)
 
     env = _no_prompt_env()
+    redacted_url = _redact_url_credentials(upstream_url)
 
     try:
         # Full (non-shallow) clone. The `--` end-of-options marker prevents
@@ -98,7 +152,7 @@ def clone_and_resolve_git_source(
         )
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
-            f"Failed to clone git repository: {upstream_url} (ref={ref})"
+            f"Failed to clone git repository: {redacted_url} (ref={ref})"
         ) from e
 
     try:
@@ -106,30 +160,22 @@ def clone_and_resolve_git_source(
         # (archive_git_source_to_dir operates on the resolved SHA, not a
         # working tree). `--verify --end-of-options` rejects an option-like
         # ref (e.g. "--orphan=x") instead of silently treating it as a flag.
-        result = subprocess.run(
-            ["git", "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}"],
-            cwd=clone_dir,
-            check=True,
-            capture_output=True,
-            text=True,
-            env=env,
-        )
-        resolved_sha = result.stdout.strip()
+        resolved_sha = _resolve_ref_to_sha(ref, clone_dir, env)
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
-            f"Failed to resolve ref '{ref}' to commit SHA from {upstream_url}"
+            f"Failed to resolve ref '{ref}' to commit SHA from {redacted_url}"
         ) from e
 
     if not _SHA_RE.match(resolved_sha):
         raise RuntimeError(
-            f"Resolved ref '{ref}' from {upstream_url} to an invalid commit "
+            f"Resolved ref '{ref}' from {redacted_url} to an invalid commit "
             f"SHA: {resolved_sha!r}"
         )
 
     return ClonedGitSource(
         package=package,
         version=version,
-        upstream_url=upstream_url,
+        upstream_url=redacted_url,
         ref=ref,
         resolved_sha=resolved_sha,
         clone_dir=clone_dir,
