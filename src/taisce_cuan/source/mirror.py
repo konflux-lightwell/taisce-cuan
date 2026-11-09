@@ -867,6 +867,13 @@ class GitMirrorPublisher:
                 resolved_sha,
             )
             return True
+        if stored_sha is None:
+            raise ValueError(
+                f"Tag {tag_name} already exists but was ingested via the "
+                f"sdist route (no canonical_source_sha recorded); refusing "
+                f"to overwrite it with a git source resolved to "
+                f"{resolved_sha!r}."
+            )
         raise ValueError(
             f"Tag {tag_name} already exists with a different "
             f"canonical_source_sha ({stored_sha!r} vs resolved "
