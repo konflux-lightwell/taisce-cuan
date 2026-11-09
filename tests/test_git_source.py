@@ -152,6 +152,50 @@ def test_credentials_stripped_from_error_text_on_failed_resolution(tmp_path):
         assert "127.0.0.1" in str(exc)
 
 
+def test_credentials_stripped_from_schemeless_upstream_url(
+    tmp_path, make_local_git_repo
+):
+    """_redact_url_credentials must also handle a URL missing its scheme
+    prefix (e.g. "https://" typo'd away during copy-paste) -- urlsplit alone
+    only recognizes userinfo inside a proper scheme://netloc, so a bare
+    "user:token@host/path" previously passed through unredacted. Code-review
+    finding on LWLP-4828."""
+    credentialed_url = "user:tok3n@127.0.0.1:1/nonexistent.git"
+    try:
+        clone_and_resolve_git_source(
+            credentialed_url,
+            "main",
+            tmp_path / "work",
+            package="pkg",
+            version="1.0",
+        )
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        assert "tok3n" not in str(exc)
+
+
+def test_credentials_not_leaked_via_exception_chain_on_clone_failure(tmp_path):
+    """The RuntimeError raised on a clone failure must not chain the
+    underlying CalledProcessError: its .cmd attribute holds the raw argv
+    (including the unredacted URL, since the real credentialed URL is
+    needed for the actual `git clone` auth), so a caller that logs with a
+    traceback (logger.exception, exc_info=True) would otherwise leak it
+    even though the RuntimeError's own text is redacted. Code-review finding
+    on LWLP-4828; mirror.py's _push_tags already uses `from None` for the
+    same reason."""
+    try:
+        clone_and_resolve_git_source(
+            "https://user:supersecrettoken@127.0.0.1:1/nonexistent.git",
+            "main",
+            tmp_path / "work",
+            package="pkg",
+            version="1.0",
+        )
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        assert exc.__cause__ is None
+
+
 def test_resolves_non_default_branch_via_origin_fallback(tmp_path, make_local_git_repo):
     """A plain `git clone` only creates a local ref for the default branch --
     other branches exist only as `origin/<branch>`. clone_and_resolve_git_source
