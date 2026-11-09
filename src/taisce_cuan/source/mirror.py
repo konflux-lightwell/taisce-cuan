@@ -967,7 +967,7 @@ class GitMirrorPublisher:
         subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
         commit_msg = (
             f"ingest: {canonical} {request.version} from git "
-            f"({request.upstream_url})\n\ncommit: {cloned.resolved_sha}"
+            f"({cloned.upstream_url})\n\ncommit: {cloned.resolved_sha}"
         )
         subprocess.run(["git", "commit", "-m", commit_msg], cwd=repo_dir, check=True)
 

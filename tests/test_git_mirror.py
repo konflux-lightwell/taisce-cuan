@@ -1559,6 +1559,40 @@ def test_publish_git_source_dry_run_writes_pin(tmp_path, make_local_git_repo):
     assert canonical_commit == baseline_commit
 
 
+def test_publish_git_source_does_not_leak_credentials_into_commit_or_metadata(
+    tmp_path, make_local_git_repo
+):
+    """upstream_url with embedded userinfo must not end up verbatim in
+    .lightwell/metadata.json or the mirror commit message. LWLP-4828 review
+    item 1."""
+    upstream = make_local_git_repo(tmp_path, "griffe", "1.5.1")
+    credentialed_url = f"file://user:tok3n@{upstream.resolve()}"
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com", group="testgroup"
+    )
+
+    publisher.publish_git_source(
+        PublishGitSourceRequest(
+            upstream_url=credentialed_url,
+            ref="1.5.1",
+            package="griffe",
+            version="1.5.1",
+            workspace_dir=workspace,
+            dry_run=True,
+        )
+    )
+
+    repo_dir = workspace / "pypi.org-griffe"
+    meta_text = (repo_dir / ".lightwell" / "metadata.json").read_text()
+    assert "tok3n" not in meta_text
+
+    commit_msg = subprocess.check_output(
+        ["git", "log", "-1", "--format=%B"], cwd=repo_dir, text=True
+    )
+    assert "tok3n" not in commit_msg
+
+
 @pytest.mark.skipif(
     not shutil.which("cosign"), reason="cosign CLI binary is not installed"
 )
