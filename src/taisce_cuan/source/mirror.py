@@ -51,6 +51,7 @@ from taisce_cuan.provenance.verify import (
 )
 from taisce_cuan.sdist import canonicalize_name, extract_sdist_to_source
 from taisce_cuan.source.git_source import (
+    ClonedGitSource,
     archive_git_source_to_dir,
     clone_and_resolve_git_source,
 )
@@ -753,6 +754,278 @@ class GitMirrorPublisher:
             disposition="published",
         )
 
+    def _resolve_and_archive_git_source(
+        self, request: PublishGitSourceRequest, clone_scratch_dir: Path
+    ) -> tuple[ClonedGitSource, Path, str]:
+        """Clone upstream, resolve ref -> commit SHA, and archive that
+        commit's tree to a scratch directory, returning a content hash used
+        by publish_git_source's idempotency check."""
+        cloned = clone_and_resolve_git_source(
+            request.upstream_url,
+            request.ref,
+            clone_scratch_dir,
+            package=request.package,
+            version=request.version,
+        )
+        scratch_source_dir = clone_scratch_dir / "archived-source"
+        source_sha256 = archive_git_source_to_dir(cloned, scratch_source_dir)
+        return cloned, scratch_source_dir, source_sha256
+
+    def _init_git_repo(self, repo_dir: Path) -> None:
+        """Git init the repo directory with committer identity, if not
+        already a git repo."""
+        if (repo_dir / ".git").exists():
+            return
+        subprocess.run(
+            ["git", "init", "--initial-branch=main"],
+            cwd=repo_dir,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", self.committer_name],
+            cwd=repo_dir,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", self.committer_email],
+            cwd=repo_dir,
+            check=True,
+        )
+
+    def _configure_git_auth(self, repo_dir: Path) -> None:
+        """Configure git http.extraHeader for forge auth, if an auth_token is
+        set."""
+        if not self.auth_token:
+            return
+        if "gitlab" in self.forge_url.lower():
+            import base64
+
+            basic_auth = base64.b64encode(
+                f"{self.username}:{self.auth_token}".encode()
+            ).decode()
+            header = f"Authorization: Basic {basic_auth}"
+        else:
+            header = f"Authorization: Bearer {self.auth_token}"
+        subprocess.run(
+            ["git", "config", "http.extraHeader", header], cwd=repo_dir, check=True
+        )
+
+    def _fetch_existing_remote_refs(self, repo_dir: Path, remote_url: str) -> None:
+        """Validate access to remote_url, then fetch its branches and tags
+        for the idempotency and branch-advance checks below."""
+        ls_res = subprocess.run(
+            ["git", "ls-remote", remote_url],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if ls_res.returncode != 0:
+            raise RuntimeError(
+                f"Could not access remote repository {remote_url}: "
+                f"{ls_res.stderr.strip()}"
+            )
+
+        fetch_res = subprocess.run(
+            [
+                "git",
+                "fetch",
+                "--force",
+                "--tags",
+                remote_url,
+                "+refs/heads/*:refs/remotes/origin/*",
+            ],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if fetch_res.returncode != 0:
+            logger.info(
+                "Remote repository appears empty or has no matching refs; "
+                "initializing fresh tree"
+            )
+
+    def _check_git_source_idempotency(
+        self, repo_dir: Path, canonical: str, tag_name: str, resolved_sha: str
+    ) -> bool:
+        """Return True when tag_name already exists pinned to resolved_sha
+        (nothing to do). Raise ValueError when tag_name exists with a
+        different canonical_source_sha."""
+        existing_tags = self.get_existing_tags(repo_dir, canonical)
+        existing_tag_names = [t[1] for t in existing_tags]
+        if tag_name not in existing_tag_names:
+            return False
+
+        stored_sha = self._existing_tag_canonical_source_sha(repo_dir, tag_name)
+        if stored_sha == resolved_sha:
+            logger.info(
+                "Tag %s already exists pinned to commit %s. Nothing to do; "
+                "preserving the existing archive and provenance.",
+                tag_name,
+                resolved_sha,
+            )
+            return True
+        raise ValueError(
+            f"Tag {tag_name} already exists with a different "
+            f"canonical_source_sha ({stored_sha!r} vs resolved "
+            f"{resolved_sha!r}); refusing to overwrite an ingested version."
+        )
+
+    def _checkout_orphan_stream_branch(
+        self, repo_dir: Path, target_branch: str
+    ) -> None:
+        """Refuse to advance a stream branch that already exists locally or
+        on the remote; otherwise check out a clean orphan branch for it."""
+        exists_local = (
+            subprocess.run(
+                ["git", "rev-parse", "--verify", f"refs/heads/{target_branch}"],
+                cwd=repo_dir,
+                capture_output=True,
+            ).returncode
+            == 0
+        )
+        exists_remote = (
+            subprocess.run(
+                [
+                    "git",
+                    "rev-parse",
+                    "--verify",
+                    f"refs/remotes/origin/{target_branch}",
+                ],
+                cwd=repo_dir,
+                capture_output=True,
+            ).returncode
+            == 0
+        )
+        if exists_local:
+            raise ValueError(
+                f"Stream branch {target_branch} already exists locally; "
+                f"refusing to advance."
+            )
+        elif exists_remote:
+            raise ValueError(
+                f"Stream branch {target_branch} already exists; refusing to "
+                f"advance it during ingestion."
+            )
+
+        subprocess.run(
+            ["git", "checkout", "--orphan", target_branch], cwd=repo_dir, check=True
+        )
+        subprocess.run(
+            ["git", "rm", "-rf", "."], cwd=repo_dir, capture_output=True, check=False
+        )
+
+    def _write_git_source_tree(
+        self,
+        repo_dir: Path,
+        lightwell_dir: Path,
+        scratch_source_dir: Path,
+        cloned: ClonedGitSource,
+        repo_name: str,
+        source_sha256: str,
+    ) -> None:
+        """Move the already-archived source tree into place and write git
+        ingestion metadata (sets canonical_source_sha to the resolved
+        upstream commit).
+
+        The orphan-branch checkout + `git rm -rf .` in
+        _checkout_orphan_stream_branch deletes .lightwell/ from disk (it was
+        tracked from a prior version's commit when repo_dir/workspace_dir is
+        reused across calls), so it must be re-created here, immediately
+        before writing into it, rather than relying solely on the mkdir done
+        near the top of publish_git_source.
+        """
+        source_dir = repo_dir / "source"
+        if source_dir.exists():
+            shutil.rmtree(source_dir)
+        shutil.move(str(scratch_source_dir), str(source_dir))
+
+        lightwell_dir.mkdir(parents=True, exist_ok=True)
+        metadata = build_git_ingestion_metadata(cloned, repo_name, source_sha256)
+        metadata_file = lightwell_dir / "metadata.json"
+        metadata_file.write_text(
+            metadata.model_dump_json(by_alias=True, exclude_none=True, indent=2)
+        )
+
+    def _commit_and_tag_git_source(
+        self,
+        repo_dir: Path,
+        canonical: str,
+        request: PublishGitSourceRequest,
+        cloned: ClonedGitSource,
+        tag_name: str,
+        target_branch: str,
+    ) -> list[str]:
+        """Stage, commit, and tag <canonical>/<version> plus
+        baseline/<version> (the latter only if not already present). Returns
+        the tag names to push."""
+        subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
+        commit_msg = (
+            f"ingest: {canonical} {request.version} from git "
+            f"({request.upstream_url})\n\ncommit: {cloned.resolved_sha}"
+        )
+        subprocess.run(["git", "commit", "-m", commit_msg], cwd=repo_dir, check=True)
+
+        subprocess.run(["git", "tag", tag_name], cwd=repo_dir, check=True)
+        logger.info(f"Tagged {tag_name} on branch {target_branch}")
+
+        baseline_tag = f"baseline/{request.version}"
+        existing_baseline = subprocess.run(
+            ["git", "tag", "--list", baseline_tag],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        tags_to_push = [tag_name]
+        if not existing_baseline:
+            subprocess.run(["git", "tag", baseline_tag], cwd=repo_dir, check=True)
+            logger.info(f"Tagged initial {baseline_tag} on branch {target_branch}")
+            tags_to_push.append(baseline_tag)
+
+        return tags_to_push
+
+    def _push_git_source_tags(
+        self,
+        repo_dir: Path,
+        remote_url: str,
+        repo_name: str,
+        target_branch: str,
+        tags_to_push: list[str],
+        tag_name: str,
+    ) -> None:
+        """Atomically push the stream branch and tags; raise RuntimeError
+        with sanitized stderr on failure."""
+        push_cmd = [
+            "git",
+            "push",
+            "--atomic",
+            remote_url,
+            target_branch,
+            *tags_to_push,
+        ]
+
+        try:
+            subprocess.run(
+                push_cmd, cwd=repo_dir, check=True, capture_output=True, text=True
+            )
+        except subprocess.CalledProcessError as e:
+            sanitized_err = (
+                e.stderr.replace(self.auth_token, "********")
+                if self.auth_token
+                else e.stderr
+            )
+            raise RuntimeError(
+                f"Failed to push branch {target_branch} and tag {tag_name}: "
+                f"{sanitized_err}"
+            ) from None
+
+        logger.info(
+            f"Pushed {repo_name} branch {target_branch} and tag {tag_name} to remote"
+        )
+
     def publish_git_source(
         self, request: PublishGitSourceRequest
     ) -> PublishSourceResult:
@@ -785,226 +1058,59 @@ class GitMirrorPublisher:
         lightwell_dir = repo_dir / ".lightwell"
         lightwell_dir.mkdir(exist_ok=True)
 
-        # 1. Clone upstream, resolve ref -> commit SHA, and archive that
-        # commit's tree to a scratch directory to compute a content hash for
-        # the idempotency check below. The clone lives under workspace_dir in
-        # a unique subdirectory (not in system temp) so it benefits from the
-        # provisioned storage (PVC) rather than a small tmpfs, avoiding OOM
-        # in production. We clean up the clone directory explicitly afterward.
+        # The clone lives under workspace_dir in a unique subdirectory (not
+        # in system temp) so it benefits from the provisioned storage (PVC)
+        # rather than a small tmpfs, avoiding OOM in production. We clean up
+        # the clone directory explicitly afterward.
         clone_scratch_dir = request.workspace_dir / f"clone-{uuid4().hex}"
         clone_scratch_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            cloned = clone_and_resolve_git_source(
-                request.upstream_url,
-                request.ref,
-                clone_scratch_dir,
-                package=request.package,
-                version=request.version,
+            cloned, scratch_source_dir, source_sha256 = (
+                self._resolve_and_archive_git_source(request, clone_scratch_dir)
             )
-            scratch_source_dir = clone_scratch_dir / "archived-source"
-            source_sha256 = archive_git_source_to_dir(cloned, scratch_source_dir)
 
             logger.info(
                 f"Publishing git source {request.package} {request.version} "
                 f"({cloned.resolved_sha}) to {repo_name}"
             )
 
-            # 2. Git init if repo not present
-            if not (repo_dir / ".git").exists():
-                subprocess.run(
-                    ["git", "init", "--initial-branch=main"],
-                    cwd=repo_dir,
-                    check=True,
-                    capture_output=True,
-                )
-                subprocess.run(
-                    ["git", "config", "user.name", self.committer_name],
-                    cwd=repo_dir,
-                    check=True,
-                )
-                subprocess.run(
-                    ["git", "config", "user.email", self.committer_email],
-                    cwd=repo_dir,
-                    check=True,
-                )
-
-            if self.auth_token:
-                if "gitlab" in self.forge_url.lower():
-                    import base64
-
-                    basic_auth = base64.b64encode(
-                        f"{self.username}:{self.auth_token}".encode()
-                    ).decode()
-                    header = f"Authorization: Basic {basic_auth}"
-                else:
-                    header = f"Authorization: Bearer {self.auth_token}"
-                subprocess.run(
-                    ["git", "config", "http.extraHeader", header],
-                    cwd=repo_dir,
-                    check=True,
-                )
+            self._init_git_repo(repo_dir)
+            self._configure_git_auth(repo_dir)
 
             remote_url = (
                 self.ensure_remote_project(repo_name) if not request.dry_run else None
             )
-
             if remote_url and not request.dry_run:
-                ls_res = subprocess.run(
-                    ["git", "ls-remote", remote_url],
-                    cwd=repo_dir,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                if ls_res.returncode != 0:
-                    raise RuntimeError(
-                        f"Could not access remote repository {remote_url}: "
-                        f"{ls_res.stderr.strip()}"
-                    )
-
-                fetch_res = subprocess.run(
-                    [
-                        "git",
-                        "fetch",
-                        "--force",
-                        "--tags",
-                        remote_url,
-                        "+refs/heads/*:refs/remotes/origin/*",
-                    ],
-                    cwd=repo_dir,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                if fetch_res.returncode != 0:
-                    logger.info(
-                        "Remote repository appears empty or has no matching refs; "
-                        "initializing fresh tree"
-                    )
-
-            # 3. Check existing tags and idempotency / overwrite protection
-            existing_tags = self.get_existing_tags(repo_dir, canonical)
-            existing_tag_names = [t[1] for t in existing_tags]
+                self._fetch_existing_remote_refs(repo_dir, remote_url)
 
             target_branch = f"stream/{request.version}"
 
-            if tag_name in existing_tag_names:
-                stored_sha = self._existing_tag_canonical_source_sha(repo_dir, tag_name)
-                if stored_sha == cloned.resolved_sha:
-                    logger.info(
-                        "Tag %s already exists pinned to commit %s. Nothing "
-                        "to do; preserving the existing archive and "
-                        "provenance.",
-                        tag_name,
-                        cloned.resolved_sha,
-                    )
-                    return PublishSourceResult(
-                        tag_name=tag_name,
-                        repo_name=repo_name,
-                        target_branch=target_branch,
-                        normalized_sha256=source_sha256,
-                        route=SourceRoute.GIT,
-                        disposition="already-present",
-                    )
-                raise ValueError(
-                    f"Tag {tag_name} already exists with a different "
-                    f"canonical_source_sha ({stored_sha!r} vs resolved "
-                    f"{cloned.resolved_sha!r}); refusing to overwrite an "
-                    f"ingested version."
+            if self._check_git_source_idempotency(
+                repo_dir, canonical, tag_name, cloned.resolved_sha
+            ):
+                return PublishSourceResult(
+                    tag_name=tag_name,
+                    repo_name=repo_name,
+                    target_branch=target_branch,
+                    normalized_sha256=source_sha256,
+                    route=SourceRoute.GIT,
+                    disposition="already-present",
                 )
 
-            # 4. Check out the version-derived stream branch, refusing to
-            # advance one that already exists during ingestion.
-            exists_local = (
-                subprocess.run(
-                    ["git", "rev-parse", "--verify", f"refs/heads/{target_branch}"],
-                    cwd=repo_dir,
-                    capture_output=True,
-                ).returncode
-                == 0
-            )
-            exists_remote = (
-                subprocess.run(
-                    [
-                        "git",
-                        "rev-parse",
-                        "--verify",
-                        f"refs/remotes/origin/{target_branch}",
-                    ],
-                    cwd=repo_dir,
-                    capture_output=True,
-                ).returncode
-                == 0
-            )
-            if exists_local:
-                raise ValueError(
-                    f"Stream branch {target_branch} already exists locally; "
-                    f"refusing to advance."
-                )
-            elif exists_remote:
-                raise ValueError(
-                    f"Stream branch {target_branch} already exists; refusing to "
-                    f"advance it during ingestion."
-                )
-
-            subprocess.run(
-                ["git", "checkout", "--orphan", target_branch], cwd=repo_dir, check=True
-            )
-            subprocess.run(
-                ["git", "rm", "-rf", "."],
-                cwd=repo_dir,
-                capture_output=True,
-                check=False,
+            self._checkout_orphan_stream_branch(repo_dir, target_branch)
+            self._write_git_source_tree(
+                repo_dir,
+                lightwell_dir,
+                scratch_source_dir,
+                cloned,
+                repo_name,
+                source_sha256,
             )
 
-            # 5. Move the already-archived source tree into place
-            source_dir = repo_dir / "source"
-            if source_dir.exists():
-                shutil.rmtree(source_dir)
-            shutil.move(str(scratch_source_dir), str(source_dir))
-
-            # 6. Build and write git ingestion metadata (sets
-            # canonical_source_sha to the resolved upstream commit).
-            # The orphan-branch checkout + `git rm -rf .` above deletes
-            # .lightwell/ from disk (it was tracked from a prior version's
-            # commit when repo_dir/workspace_dir is reused across calls), so
-            # it must be re-created here, immediately before writing into it,
-            # rather than relying solely on the mkdir done near the top of
-            # this method.
-            lightwell_dir.mkdir(parents=True, exist_ok=True)
-            metadata = build_git_ingestion_metadata(cloned, repo_name, source_sha256)
-            metadata_file = lightwell_dir / "metadata.json"
-            metadata_file.write_text(
-                metadata.model_dump_json(by_alias=True, exclude_none=True, indent=2)
+            tags_to_push = self._commit_and_tag_git_source(
+                repo_dir, canonical, request, cloned, tag_name, target_branch
             )
-
-            # 7. Stage, commit, tag, and atomic push
-            subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
-            commit_msg = (
-                f"ingest: {canonical} {request.version} from git "
-                f"({request.upstream_url})\n\ncommit: {cloned.resolved_sha}"
-            )
-            subprocess.run(
-                ["git", "commit", "-m", commit_msg], cwd=repo_dir, check=True
-            )
-
-            subprocess.run(["git", "tag", tag_name], cwd=repo_dir, check=True)
-            logger.info(f"Tagged {tag_name} on branch {target_branch}")
-
-            baseline_tag = f"baseline/{request.version}"
-            existing_baseline = subprocess.run(
-                ["git", "tag", "--list", baseline_tag],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-            ).stdout.strip()
-
-            tags_to_push = [tag_name]
-            if not existing_baseline:
-                subprocess.run(["git", "tag", baseline_tag], cwd=repo_dir, check=True)
-                logger.info(f"Tagged initial {baseline_tag} on branch {target_branch}")
-                tags_to_push.append(baseline_tag)
 
             if request.dry_run or not remote_url:
                 logger.info("Dry-run requested; skipping git push")
@@ -1017,34 +1123,10 @@ class GitMirrorPublisher:
                     disposition="published",
                 )
 
-            push_cmd = [
-                "git",
-                "push",
-                "--atomic",
-                remote_url,
-                target_branch,
-                *tags_to_push,
-            ]
-
-            try:
-                subprocess.run(
-                    push_cmd, cwd=repo_dir, check=True, capture_output=True, text=True
-                )
-            except subprocess.CalledProcessError as e:
-                sanitized_err = (
-                    e.stderr.replace(self.auth_token, "********")
-                    if self.auth_token
-                    else e.stderr
-                )
-                raise RuntimeError(
-                    f"Failed to push branch {target_branch} and tag {tag_name}: "
-                    f"{sanitized_err}"
-                ) from None
-
-            logger.info(
-                f"Pushed {repo_name} branch {target_branch} and tag {tag_name} "
-                f"to remote"
+            self._push_git_source_tags(
+                repo_dir, remote_url, repo_name, target_branch, tags_to_push, tag_name
             )
+
             return PublishSourceResult(
                 tag_name=tag_name,
                 repo_name=repo_name,
