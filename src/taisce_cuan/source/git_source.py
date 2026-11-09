@@ -22,11 +22,18 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
 
 from taisce_cuan.sdist import compute_sha256
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
+# Matches an optional scheme (captured, so it survives the strip) followed by
+# a colon-separated userinfo pair ("user:token@") before the first path
+# separator. Deliberately narrower than "any netloc with an '@'": a bare
+# `user@host` (no ':') is left alone, since that's an SSH routing username
+# (e.g. the conventional `git@github.com`), not a credential.
+_CREDENTIALED_URL_PREFIX_RE = re.compile(
+    r"^((?:[a-zA-Z][a-zA-Z0-9+.-]*://)?)[^/@]+:[^/@]+@"
+)
 
 
 def _no_prompt_env() -> dict[str, str]:
@@ -38,18 +45,18 @@ def _no_prompt_env() -> dict[str, str]:
 
 
 def _redact_url_credentials(url: str) -> str:
-    """Strip embedded userinfo (e.g. `user:token@`) from a URL before it is
-    persisted to metadata, a commit message, or error/log text.
+    """Strip an embedded `user:token@` credential pair from a URL before it
+    is persisted to metadata, a commit message, or error/log text.
 
-    A no-op for values with no netloc userinfo to strip -- plain filesystem
-    paths and scp-style SSH refs (`git@host:path`) both parse with an empty
-    netloc, so they pass through unchanged.
+    Matched via regex rather than `urllib.parse.urlsplit`, which only
+    recognizes userinfo inside a proper `scheme://netloc` -- a URL missing
+    its scheme (e.g. "https://" dropped during copy-paste) still has a
+    netloc-shaped credential prefix that urlsplit would silently leave
+    unparsed and unredacted. A no-op for plain filesystem paths and
+    scp-style SSH refs (`git@host:path`), which don't match the
+    colon-separated-pair shape.
     """
-    parsed = urlsplit(url)
-    if "@" not in parsed.netloc:
-        return url
-    _, _, host = parsed.netloc.rpartition("@")
-    return urlunsplit(parsed._replace(netloc=host))
+    return _CREDENTIALED_URL_PREFIX_RE.sub(r"\1", url)
 
 
 def _resolve_ref_to_sha(ref: str, clone_dir: Path, env: dict[str, str]) -> str:
@@ -150,10 +157,14 @@ def clone_and_resolve_git_source(
             capture_output=True,
             env=env,
         )
-    except subprocess.CalledProcessError as e:
+    except subprocess.CalledProcessError:
+        # `from None`, not `from e`: CalledProcessError.cmd holds the raw
+        # argv passed above, including the unredacted upstream_url (needed
+        # there for real auth) -- chaining it would leak the credential to
+        # any caller that logs this exception with a traceback.
         raise RuntimeError(
             f"Failed to clone git repository: {redacted_url} (ref={ref})"
-        ) from e
+        ) from None
 
     try:
         # Resolve the ref directly to its commit SHA without checking it out
