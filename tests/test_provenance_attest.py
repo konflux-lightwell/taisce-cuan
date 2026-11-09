@@ -26,6 +26,7 @@ import pytest
 
 from taisce_cuan.provenance.attest import (
     CosignAttestationSigner,
+    attest_git_source_mirror,
     attest_source_mirror,
     build_git_ingestion_metadata,
     build_ingestion_metadata,
@@ -255,3 +256,58 @@ def test_build_git_ingestion_metadata_sets_canonical_source_sha(tmp_path):
         metadata.predicate.runDetails.metadata.lightwell_builds.source_registry_used
         == "git"
     )
+    assert (
+        metadata.predicate.runDetails.metadata.attestation_level == "unsigned-inventory"
+    )
+
+
+def test_build_git_ingestion_metadata_signed_attestation_level(tmp_path):
+    cloned = ClonedGitSource(
+        package="griffe",
+        version="1.5.1",
+        upstream_url="https://github.com/mkdocstrings/griffe.git",
+        ref="1.5.1",
+        resolved_sha="f" * 40,
+        clone_dir=tmp_path,
+    )
+
+    metadata = build_git_ingestion_metadata(
+        cloned, "pypi.org-griffe", "a" * 64, sign_key="/some/key"
+    )
+
+    assert metadata.predicate.runDetails.metadata.attestation_level == "signed"
+
+
+@pytest.mark.skipif(
+    not shutil.which("cosign"), reason="cosign CLI binary is not installed"
+)
+def test_attest_git_source_mirror_signs_metadata_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("COSIGN_PASSWORD", "")
+    key_prefix = tmp_path / "cosign_key"
+    subprocess.run(
+        ["cosign", "generate-key-pair", f"--output-key-prefix={key_prefix}"],
+        check=True,
+        capture_output=True,
+    )
+    key_path = str(tmp_path / "cosign_key.key")
+
+    cloned = ClonedGitSource(
+        package="griffe",
+        version="1.5.1",
+        upstream_url="https://github.com/mkdocstrings/griffe.git",
+        ref="1.5.1",
+        resolved_sha="f" * 40,
+        clone_dir=tmp_path,
+    )
+    repo_dir = tmp_path / "repo_git"
+
+    attest_git_source_mirror(
+        cloned, repo_dir, "pypi.org-griffe", "a" * 64, sign_key=key_path
+    )
+
+    lightwell_dir = repo_dir / ".lightwell"
+    assert (lightwell_dir / "metadata.json").exists()
+    assert (lightwell_dir / "metadata.dsse.json").exists()
+    assert not (lightwell_dir / "provenance.dsse.json").exists()

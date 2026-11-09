@@ -78,6 +78,8 @@ class PublishGitSourceRequest:
     package: str
     version: str
     workspace_dir: Path
+    sign_key: str | None = None
+    public_key: str | None = None
     dry_run: bool = False
 
 
@@ -209,6 +211,7 @@ def build_git_ingestion_metadata(
     repo_name: str,
     source_sha256: str,
     *,
+    sign_key: str | None = None,
     timestamp: datetime.datetime | None = None,
 ) -> IngestionMetadata:
     """
@@ -238,7 +241,12 @@ def build_git_ingestion_metadata(
         )
     ]
 
-    note = "Unsigned SLSA Build Provenance inventory (git-source ingestion)."
+    attestation_level = "signed" if sign_key else "unsigned-inventory"
+    note = (
+        "Signed Lightwell metadata attestation (git-source ingestion)."
+        if sign_key
+        else "Unsigned SLSA Build Provenance inventory (git-source ingestion)."
+    )
 
     return IngestionMetadata(
         subject=subjects,
@@ -257,7 +265,7 @@ def build_git_ingestion_metadata(
                 metadata=RunDetailsMetadata(
                     startedOn=now_str,
                     finishedOn=now_str,
-                    attestation_level="unsigned-inventory",
+                    attestation_level=attestation_level,
                     note=note,
                     lightwell_builds=LightwellBuildsInfo(
                         repo=repo_name,
@@ -358,6 +366,26 @@ class CosignAttestationSigner:
                 os.unlink(pred_tmp_path)
 
 
+def _resolve_verification_key(sign_key: str, public_key: str | None) -> str | None:
+    """Determine the cosign public key to self-verify a freshly signed
+    metadata.dsse.json against, or None if none can be determined (in which
+    case self-verification is skipped)."""
+    if public_key:
+        return public_key
+    if sign_key.startswith(
+        ("awskms://", "k8s://", "gcpkms://", "azurekms://", "vault://")
+    ):
+        return sign_key
+    candidate_pub = Path(sign_key).with_suffix(".pub")
+    if candidate_pub.is_file():
+        return str(candidate_pub)
+    if Path("/etc/signing-secret/cosign.pub").is_file():
+        return "/etc/signing-secret/cosign.pub"
+    if Path("/etc/signing-secret/public.pem").is_file():
+        return "/etc/signing-secret/public.pem"
+    return None
+
+
 def attest_source_mirror(
     verified: VerifiedSourceArtifact,
     repo_dir: Path,
@@ -415,22 +443,7 @@ def attest_source_mirror(
 
         # Self-verify the newly signed metadata attestation if a public
         # verification key is available
-        verification_key = None
-        if public_key:
-            verification_key = public_key
-        elif sign_key.startswith(
-            ("awskms://", "k8s://", "gcpkms://", "azurekms://", "vault://")
-        ):
-            verification_key = sign_key
-        else:
-            candidate_pub = Path(sign_key).with_suffix(".pub")
-            if candidate_pub.is_file():
-                verification_key = str(candidate_pub)
-            elif Path("/etc/signing-secret/cosign.pub").is_file():
-                verification_key = "/etc/signing-secret/cosign.pub"
-            elif Path("/etc/signing-secret/public.pem").is_file():
-                verification_key = "/etc/signing-secret/public.pem"
-
+        verification_key = _resolve_verification_key(sign_key, public_key)
         if verification_key:
             verify_bundle_attestation(
                 metadata_file,
@@ -450,5 +463,77 @@ def attest_source_mirror(
         (lightwell_dir / "metadata.dsse.json").unlink(missing_ok=True)
         if verified.route == SourceRoute.PYPI:
             (lightwell_dir / "provenance.dsse.json").unlink(missing_ok=True)
+
+    return metadata
+
+
+def attest_git_source_mirror(
+    cloned: ClonedGitSource,
+    repo_dir: Path,
+    repo_name: str,
+    source_sha256: str,
+    *,
+    sign_key: str | None = None,
+    public_key: str | None = None,
+    signer: CosignAttestationSigner | None = None,
+    timestamp: datetime.datetime | None = None,
+) -> IngestionMetadata:
+    """
+    Build metadata, write .lightwell/metadata.json, and sign it for a
+    git-sourced package.
+
+    Mirrors attest_source_mirror's RHTL behavior: only metadata.dsse.json is
+    signed. Unlike PyPI, there is no normalized sdist artifact distinct from
+    the archived git tree to sign separately as provenance.dsse.json -- the
+    tree is already covered by metadata.json's subject digest. Unlike RHTL,
+    there is no upstream-provided provenance to adapt. All signed envelopes
+    use the .dsse.json extension; legacy .dsse files are unlinked.
+    """
+    lightwell_dir = (
+        repo_dir if repo_dir.name == ".lightwell" else (repo_dir / ".lightwell")
+    )
+    lightwell_dir.mkdir(parents=True, exist_ok=True)
+
+    metadata = build_git_ingestion_metadata(
+        cloned,
+        repo_name,
+        source_sha256,
+        sign_key=sign_key,
+        timestamp=timestamp,
+    )
+
+    metadata_file = lightwell_dir / "metadata.json"
+    with open(metadata_file, "w") as f:
+        f.write(metadata.model_dump_json(by_alias=True, exclude_none=True, indent=2))
+
+    # Unlink legacy unextended files
+    (lightwell_dir / "metadata.dsse").unlink(missing_ok=True)
+    (lightwell_dir / "provenance.dsse").unlink(missing_ok=True)
+
+    if sign_key:
+        active_signer = signer or CosignAttestationSigner()
+        metadata_attestation = active_signer.sign(
+            metadata=metadata,
+            source_file=metadata_file,
+            sign_key=sign_key,
+            output_provenance_file=lightwell_dir / "metadata.dsse.json",
+        )
+        if metadata_attestation is None:
+            raise RuntimeError(
+                "metadata signing is required when a signing key is configured"
+            )
+
+        # Self-verify the newly signed metadata attestation if a public
+        # verification key is available
+        verification_key = _resolve_verification_key(sign_key, public_key)
+        if verification_key:
+            verify_bundle_attestation(
+                metadata_file,
+                metadata_attestation,
+                verification_key,
+                "https://slsa.dev/provenance/v1",
+            )
+    else:
+        (lightwell_dir / "metadata.dsse.json").unlink(missing_ok=True)
 
     return metadata

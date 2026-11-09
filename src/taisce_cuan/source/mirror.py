@@ -38,8 +38,8 @@ from taisce_cuan.provenance.attest import (
     PublishGitSourceRequest,
     PublishSourceRequest,
     PublishSourceResult,
+    attest_git_source_mirror,
     attest_source_mirror,
-    build_git_ingestion_metadata,
 )
 from taisce_cuan.provenance.verify import (
     SourceRoute,
@@ -920,33 +920,36 @@ class GitMirrorPublisher:
     def _write_git_source_tree(
         self,
         repo_dir: Path,
-        lightwell_dir: Path,
         scratch_source_dir: Path,
         cloned: ClonedGitSource,
         repo_name: str,
         source_sha256: str,
+        request: PublishGitSourceRequest,
     ) -> None:
-        """Move the already-archived source tree into place and write git
-        ingestion metadata (sets canonical_source_sha to the resolved
-        upstream commit).
+        """Move the already-archived source tree into place, then build,
+        write, and (if request.sign_key is set) sign the git ingestion
+        metadata (sets canonical_source_sha to the resolved upstream
+        commit).
 
         The orphan-branch checkout + `git rm -rf .` in
         _checkout_orphan_stream_branch deletes .lightwell/ from disk (it was
         tracked from a prior version's commit when repo_dir/workspace_dir is
-        reused across calls), so it must be re-created here, immediately
-        before writing into it, rather than relying solely on the mkdir done
-        near the top of publish_git_source.
+        reused across calls); attest_git_source_mirror re-creates it,
+        immediately before writing into it, rather than relying solely on
+        the mkdir done near the top of publish_git_source.
         """
         source_dir = repo_dir / "source"
         if source_dir.exists():
             shutil.rmtree(source_dir)
         shutil.move(str(scratch_source_dir), str(source_dir))
 
-        lightwell_dir.mkdir(parents=True, exist_ok=True)
-        metadata = build_git_ingestion_metadata(cloned, repo_name, source_sha256)
-        metadata_file = lightwell_dir / "metadata.json"
-        metadata_file.write_text(
-            metadata.model_dump_json(by_alias=True, exclude_none=True, indent=2)
+        attest_git_source_mirror(
+            cloned,
+            repo_dir=repo_dir,
+            repo_name=repo_name,
+            source_sha256=source_sha256,
+            sign_key=request.sign_key,
+            public_key=request.public_key,
         )
 
     def _commit_and_tag_git_source(
@@ -1040,8 +1043,10 @@ class GitMirrorPublisher:
         but sources the tree from clone_and_resolve_git_source and
         archive_git_source_to_dir instead of a verified sdist artifact.
 
-        No signing support for the git-source path — out of scope per the
-        plan's Global Constraints.
+        Signs .lightwell/metadata.json via cosign when request.sign_key is
+        set, same as the sdist route's attest_source_mirror. There is no
+        separate provenance.dsse.json for this route: the archived git tree
+        is the sole subject and is already covered by the signed metadata.
         """
         canonical = canonicalize_name(request.package)
         tag_name = f"{canonical}/{request.version}"
@@ -1101,11 +1106,11 @@ class GitMirrorPublisher:
             self._checkout_orphan_stream_branch(repo_dir, target_branch)
             self._write_git_source_tree(
                 repo_dir,
-                lightwell_dir,
                 scratch_source_dir,
                 cloned,
                 repo_name,
                 source_sha256,
+                request,
             )
 
             tags_to_push = self._commit_and_tag_git_source(
