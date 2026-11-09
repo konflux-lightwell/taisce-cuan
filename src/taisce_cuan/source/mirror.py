@@ -600,7 +600,7 @@ class GitMirrorPublisher:
             f"\n\nsha256: {source_sha256}"
         )
         tags_to_push = self._commit_and_tag(
-            repo_dir, request.version, commit_msg, tag_name, target_branch
+            repo_dir, canonical, request.version, commit_msg, target_branch
         )
 
         if request.dry_run or not remote_url:
@@ -742,9 +742,10 @@ class GitMirrorPublisher:
             return True
         if stored_sha is None:
             raise ValueError(
-                f"Tag {tag_name} already exists but was ingested via the "
-                f"sdist route (no canonical_source_sha recorded); refusing "
-                f"to overwrite it with a git source resolved to "
+                f"Tag {tag_name} already exists with no canonical_source_sha "
+                f"recorded -- either it was ingested via the sdist route, or "
+                f"its .lightwell/metadata.json is missing or unreadable; "
+                f"refusing to overwrite it with a git source resolved to "
                 f"{resolved_sha!r}."
             )
         raise ValueError(
@@ -835,16 +836,21 @@ class GitMirrorPublisher:
     def _commit_and_tag(
         self,
         repo_dir: Path,
+        canonical: str,
         version: str,
         commit_msg: str,
-        tag_name: str,
         target_branch: str,
     ) -> list[str]:
         """Stage, commit, and tag <canonical>/<version> plus
         baseline/<version> (the latter only if not already present). Returns
         the tag names to push. Shared by both the sdist (publish()) and
         git-source (publish_git_source()) routes -- the commit message is
-        route-specific, so callers build it."""
+        route-specific, so callers build it.
+
+        Derives tag_name from (canonical, version) itself rather than taking
+        it as a separate parameter, so there's no way for a caller to pass a
+        tag_name/version pair that disagree."""
+        tag_name = f"{canonical}/{version}"
         subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
         subprocess.run(["git", "commit", "-m", commit_msg], cwd=repo_dir, check=True)
 
@@ -996,7 +1002,7 @@ class GitMirrorPublisher:
                 f"({cloned.upstream_url})\n\ncommit: {cloned.resolved_sha}"
             )
             tags_to_push = self._commit_and_tag(
-                repo_dir, request.version, commit_msg, tag_name, target_branch
+                repo_dir, canonical, request.version, commit_msg, target_branch
             )
 
             if request.dry_run or not remote_url:
