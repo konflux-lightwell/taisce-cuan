@@ -1559,6 +1559,50 @@ def test_publish_git_source_dry_run_writes_pin(tmp_path, make_local_git_repo):
     assert canonical_commit == baseline_commit
 
 
+@pytest.mark.skipif(
+    not shutil.which("cosign"), reason="cosign CLI binary is not installed"
+)
+def test_publish_git_source_signs_metadata_when_sign_key_provided(
+    tmp_path, make_local_git_repo, monkeypatch
+):
+    monkeypatch.setenv("COSIGN_PASSWORD", "")
+    key_prefix = tmp_path / "cosign_key"
+    subprocess.run(
+        ["cosign", "generate-key-pair", f"--output-key-prefix={key_prefix}"],
+        check=True,
+        capture_output=True,
+    )
+    key_path = str(tmp_path / "cosign_key.key")
+
+    upstream = make_local_git_repo(tmp_path, "griffe", "1.5.1")
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com", group="testgroup"
+    )
+
+    publisher.publish_git_source(
+        PublishGitSourceRequest(
+            upstream_url=str(upstream),
+            ref="1.5.1",
+            package="griffe",
+            version="1.5.1",
+            workspace_dir=workspace,
+            sign_key=key_path,
+            dry_run=True,
+        )
+    )
+
+    lightwell_dir = workspace / "pypi.org-griffe" / ".lightwell"
+    assert (lightwell_dir / "metadata.json").exists()
+    assert (lightwell_dir / "metadata.dsse.json").exists()
+    # No separate provenance.dsse.json for the git-source route -- the
+    # archived tree is the sole subject, already covered by signed metadata.
+    assert not (lightwell_dir / "provenance.dsse.json").exists()
+
+    meta = json.loads((lightwell_dir / "metadata.json").read_text())
+    assert meta["predicate"]["runDetails"]["metadata"]["attestation_level"] == "signed"
+
+
 def test_publish_git_source_is_idempotent(tmp_path, make_local_git_repo):
     upstream = make_local_git_repo(tmp_path, "griffe", "1.5.1")
     workspace = tmp_path / "workspace"

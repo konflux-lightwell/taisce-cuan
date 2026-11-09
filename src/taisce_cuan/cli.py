@@ -201,6 +201,16 @@ def create_parser() -> argparse.ArgumentParser:
         "--committer-email", required=True, help="Git author and committer email"
     )
     push_git_source_parser.add_argument(
+        "--sign-key",
+        default=os.getenv("SIGN_KEY"),
+        help="Path or KMS key ID for cosign attestation signing",
+    )
+    push_git_source_parser.add_argument(
+        "--public-key",
+        default=os.getenv("PUBLIC_KEY"),
+        help="Public verification key to self-verify the signed metadata attestation",
+    )
+    push_git_source_parser.add_argument(
         "--tag-protection-user-ids",
         default=os.getenv("TAG_PROTECTION_USER_IDS", ""),
         help=(
@@ -311,6 +321,8 @@ def handle_push_git_source(args: argparse.Namespace) -> int:
         package=args.package,
         version=args.version,
         workspace_dir=Path(args.workspace_dir),
+        sign_key=args.sign_key,
+        public_key=args.public_key,
         dry_run=args.dry_run,
     )
 
