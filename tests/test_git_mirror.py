@@ -1762,6 +1762,44 @@ def test_publish_git_source_refuses_to_overwrite_moved_ref(
         pass
 
 
+def test_overwrite_protection_message_names_sdist_route_when_tag_has_no_canonical_sha(
+    tmp_path: Path, make_local_git_repo
+):
+    """When an existing tag was ingested via the sdist route (no
+    canonical_source_sha recorded), the error should say so explicitly
+    rather than rendering the ambiguous 'None vs <sha>'. LWLP-4828 review
+    minor item."""
+    source_file = create_sample_source(tmp_path, "griffe", "1.5.1")
+    workspace = tmp_path / "workspace"
+    publisher = GitMirrorPublisher(
+        forge_url="https://forge.example.com", group="testgroup"
+    )
+    publisher.publish_source(
+        source_path=source_file,
+        package="griffe",
+        version="1.5.1",
+        workspace_dir=workspace,
+        dry_run=True,
+    )
+
+    upstream = make_local_git_repo(tmp_path, "griffe", "1.5.1")
+    try:
+        publisher.publish_git_source(
+            PublishGitSourceRequest(
+                upstream_url=str(upstream),
+                ref="1.5.1",
+                package="griffe",
+                version="1.5.1",
+                workspace_dir=workspace,
+                dry_run=True,
+            )
+        )
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert "None" not in str(exc)
+        assert "sdist" in str(exc)
+
+
 def test_publish_git_source_canonicalizes_package_name_for_repo_and_tag(
     tmp_path, make_local_git_repo
 ):
