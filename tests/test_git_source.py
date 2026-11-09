@@ -174,6 +174,45 @@ def test_credentials_stripped_from_schemeless_upstream_url(
         assert "tok3n" not in str(exc)
 
 
+def test_credentials_stripped_from_single_token_pat_url(tmp_path):
+    """A single-token credential URL (the common GitHub PAT/CI form,
+    `https://<token>@host/...`, with no `user:` half) must be redacted the
+    same as a user:pass pair. The prior regex only matched the two-part
+    form, so a bare token passed through completely unredacted -- at least
+    as common a shape as the tested pair form. Code-review finding on
+    LWLP-4828."""
+    try:
+        clone_and_resolve_git_source(
+            "https://ghp_abcdEF123456supersecret@127.0.0.1:1/nonexistent.git",
+            "main",
+            tmp_path / "work",
+            package="pkg",
+            version="1.0",
+        )
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        assert "ghp_abcdEF123456supersecret" not in str(exc)
+        assert "127.0.0.1" in str(exc)
+
+
+def test_ssh_username_not_treated_as_a_credential(tmp_path):
+    """A bare SSH username (the conventional `git@host` login, no colon) is
+    not a credential and must not be stripped -- only HTTP(S) single-token
+    userinfo and user:pass pairs are. Connects to a closed local port so it
+    fails fast without a real SSH handshake."""
+    try:
+        clone_and_resolve_git_source(
+            "ssh://git@127.0.0.1:1/nonexistent.git",
+            "main",
+            tmp_path / "work",
+            package="pkg",
+            version="1.0",
+        )
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        assert "git@127.0.0.1" in str(exc)
+
+
 def test_credentials_not_leaked_via_exception_chain_on_clone_failure(tmp_path):
     """The RuntimeError raised on a clone failure must not chain the
     underlying CalledProcessError: its .cmd attribute holds the raw argv
@@ -194,6 +233,27 @@ def test_credentials_not_leaked_via_exception_chain_on_clone_failure(tmp_path):
         raise AssertionError("expected RuntimeError")
     except RuntimeError as exc:
         assert exc.__cause__ is None
+
+
+def test_clone_failure_without_credentials_keeps_exception_chain_for_debugging(
+    tmp_path,
+):
+    """Chain suppression is specifically a credential-leak mitigation, not a
+    blanket policy -- a clone failure for a URL with no credentials to leak
+    should keep __cause__ (the real CalledProcessError, with its stderr and
+    returncode) for debugging ordinary failures like DNS/network/404.
+    Code-review finding on LWLP-4828."""
+    try:
+        clone_and_resolve_git_source(
+            "https://127.0.0.1:1/nonexistent.git",
+            "main",
+            tmp_path / "work",
+            package="pkg",
+            version="1.0",
+        )
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        assert isinstance(exc.__cause__, subprocess.CalledProcessError)
 
 
 def test_resolves_non_default_branch_via_origin_fallback(tmp_path, make_local_git_repo):

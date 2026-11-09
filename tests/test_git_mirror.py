@@ -1765,10 +1765,11 @@ def test_publish_git_source_refuses_to_overwrite_moved_ref(
 def test_overwrite_protection_message_names_sdist_route_when_tag_has_no_canonical_sha(
     tmp_path: Path, make_local_git_repo
 ):
-    """When an existing tag was ingested via the sdist route (no
-    canonical_source_sha recorded), the error should say so explicitly
-    rather than rendering the ambiguous 'None vs <sha>'. LWLP-4828 review
-    minor item."""
+    """When an existing tag has no canonical_source_sha recorded, the error
+    should name the sdist route as a possibility rather than rendering the
+    ambiguous 'None vs <sha>' -- but not assert it as the sole cause, since
+    a corrupted/missing metadata.json on a genuine git-route tag produces
+    the same None. LWLP-4828 review minor item."""
     source_file = create_sample_source(tmp_path, "griffe", "1.5.1")
     workspace = tmp_path / "workspace"
     publisher = GitMirrorPublisher(
@@ -1798,6 +1799,7 @@ def test_overwrite_protection_message_names_sdist_route_when_tag_has_no_canonica
     except ValueError as exc:
         assert "None" not in str(exc)
         assert "sdist" in str(exc)
+        assert "missing or unreadable" in str(exc)
 
 
 def test_publish_git_source_canonicalizes_package_name_for_repo_and_tag(

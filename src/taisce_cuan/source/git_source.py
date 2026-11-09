@@ -31,9 +31,13 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
 # separator. Deliberately narrower than "any netloc with an '@'": a bare
 # `user@host` (no ':') is left alone, since that's an SSH routing username
 # (e.g. the conventional `git@github.com`), not a credential.
-_CREDENTIALED_URL_PREFIX_RE = re.compile(
-    r"^((?:[a-zA-Z][a-zA-Z0-9+.-]*://)?)[^/@]+:[^/@]+@"
-)
+_CREDENTIALED_PAIR_RE = re.compile(r"^((?:[a-zA-Z][a-zA-Z0-9+.-]*://)?)[^/@]+:[^/@]+@")
+# A bare single-token credential before '@' (no ':' half) -- the common
+# GitHub PAT/CI form, `https://<token>@host/...`. Scoped to http(s)
+# specifically: HTTP(S) has no concept of a non-secret conventional
+# username the way SSH's `git@host` does, so any bare userinfo there is a
+# credential.
+_HTTP_BARE_TOKEN_RE = re.compile(r"^(https?://)[^/@:]+@")
 
 
 def _no_prompt_env() -> dict[str, str]:
@@ -45,18 +49,23 @@ def _no_prompt_env() -> dict[str, str]:
 
 
 def _redact_url_credentials(url: str) -> str:
-    """Strip an embedded `user:token@` credential pair from a URL before it
-    is persisted to metadata, a commit message, or error/log text.
+    """Strip an embedded credential -- a `user:token@` pair, or a bare
+    single-token `https://<token>@host` form -- from a URL before it is
+    persisted to metadata, a commit message, or error/log text.
 
     Matched via regex rather than `urllib.parse.urlsplit`, which only
     recognizes userinfo inside a proper `scheme://netloc` -- a URL missing
     its scheme (e.g. "https://" dropped during copy-paste) still has a
     netloc-shaped credential prefix that urlsplit would silently leave
     unparsed and unredacted. A no-op for plain filesystem paths and
-    scp-style SSH refs (`git@host:path`), which don't match the
-    colon-separated-pair shape.
+    scp-style/ssh:// SSH refs (`git@host:path`, `ssh://git@host/...`),
+    which don't match either credential shape -- a bare SSH username is a
+    routing identifier, not a secret, and is intentionally left alone.
     """
-    return _CREDENTIALED_URL_PREFIX_RE.sub(r"\1", url)
+    stripped = _CREDENTIALED_PAIR_RE.sub(r"\1", url)
+    if stripped != url:
+        return stripped
+    return _HTTP_BARE_TOKEN_RE.sub(r"\1", url)
 
 
 def _resolve_ref_to_sha(ref: str, clone_dir: Path, env: dict[str, str]) -> str:
@@ -69,31 +78,28 @@ def _resolve_ref_to_sha(ref: str, clone_dir: Path, env: dict[str, str]) -> str:
     branch. Falls back to `origin/<ref>` before giving up, so `--ref`
     behaves for branches as advertised.
     """
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}"],
-            cwd=clone_dir,
-            check=True,
-            capture_output=True,
-            text=True,
-            env=env,
-        )
-    except subprocess.CalledProcessError:
-        result = subprocess.run(
-            [
-                "git",
-                "rev-parse",
-                "--verify",
-                "--end-of-options",
-                f"origin/{ref}^{{commit}}",
-            ],
-            cwd=clone_dir,
-            check=True,
-            capture_output=True,
-            text=True,
-            env=env,
-        )
-    return result.stdout.strip()
+    last_error: subprocess.CalledProcessError | None = None
+    for candidate in (ref, f"origin/{ref}"):
+        try:
+            result = subprocess.run(
+                [
+                    "git",
+                    "rev-parse",
+                    "--verify",
+                    "--end-of-options",
+                    f"{candidate}^{{commit}}",
+                ],
+                cwd=clone_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            return result.stdout.strip()
+        except subprocess.CalledProcessError as e:
+            last_error = e
+    assert last_error is not None
+    raise last_error
 
 
 @dataclass(frozen=True)
@@ -157,14 +163,17 @@ def clone_and_resolve_git_source(
             capture_output=True,
             env=env,
         )
-    except subprocess.CalledProcessError:
-        # `from None`, not `from e`: CalledProcessError.cmd holds the raw
-        # argv passed above, including the unredacted upstream_url (needed
-        # there for real auth) -- chaining it would leak the credential to
-        # any caller that logs this exception with a traceback.
+    except subprocess.CalledProcessError as e:
+        # CalledProcessError.cmd holds the raw argv passed above, including
+        # the unredacted upstream_url (needed there for real auth). Only
+        # suppress the chain when the URL actually carried a credential --
+        # otherwise there's nothing to leak, and keeping __cause__ preserves
+        # the real stderr/returncode for debugging ordinary failures (DNS,
+        # network, 404).
+        cause = e if redacted_url == upstream_url else None
         raise RuntimeError(
             f"Failed to clone git repository: {redacted_url} (ref={ref})"
-        ) from None
+        ) from cause
 
     try:
         # Resolve the ref directly to its commit SHA without checking it out
