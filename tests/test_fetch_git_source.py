@@ -8,9 +8,14 @@ def test_fetch_git_source_writes_resolved_sha_result(tmp_path, monkeypatch):
 
     def fake_clone(upstream_url, ref, workspace_dir, *, package, version):
         return git_source_mod.ClonedGitSource(
-            package=package, version=version, upstream_url=upstream_url,
-            ref=ref, resolved_sha="a" * 40, clone_dir=workspace_dir / "clone",
+            package=package,
+            version=version,
+            upstream_url=upstream_url,
+            ref=ref,
+            resolved_sha="a" * 40,
+            clone_dir=workspace_dir / "clone",
         )
+
     monkeypatch.setattr(git_source_mod, "clone_and_resolve_git_source", fake_clone)
     monkeypatch.setattr(
         git_source_mod, "archive_git_source_to_dir", lambda cloned, dest: "deadbeef"
@@ -18,13 +23,16 @@ def test_fetch_git_source_writes_resolved_sha_result(tmp_path, monkeypatch):
 
     result_path = tmp_path / "resolvedSha"
     output_dir = tmp_path / "source-repo"
-    rc = main([
-        "griffe", "2.3.2",
-        "--upstream-url=https://github.com/mkdocstrings/griffe",
-        "--ref=2.3.2",
-        f"--output-dir={output_dir}",
-        f"--result-path={result_path}",
-    ])
+    rc = main(
+        [
+            "griffe",
+            "2.3.2",
+            "--upstream-url=https://github.com/mkdocstrings/griffe",
+            "--ref=2.3.2",
+            f"--output-dir={output_dir}",
+            f"--result-path={result_path}",
+        ]
+    )
 
     assert rc == 0
     assert result_path.read_text() == "a" * 40
@@ -38,12 +46,15 @@ def test_fetch_git_source_returns_1_on_clone_failure(tmp_path, monkeypatch):
 
     monkeypatch.setattr(git_source_mod, "clone_and_resolve_git_source", fake_clone)
 
-    rc = main([
-        "griffe", "2.3.2",
-        "--upstream-url=https://github.com/mkdocstrings/griffe",
-        "--ref=2.3.2",
-        f"--output-dir={tmp_path / 'source-repo'}",
-    ])
+    rc = main(
+        [
+            "griffe",
+            "2.3.2",
+            "--upstream-url=https://github.com/mkdocstrings/griffe",
+            "--ref=2.3.2",
+            f"--output-dir={tmp_path / 'source-repo'}",
+        ]
+    )
 
     assert rc == 1
 
