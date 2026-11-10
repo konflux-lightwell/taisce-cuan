@@ -26,6 +26,7 @@ import tempfile
 from collections.abc import Generator
 from pathlib import Path
 
+from taisce_cuan.provenance.attest import PublishGitSourceRequest
 from taisce_cuan.sdist import canonicalize_name, inspect_sdist_metadata
 from taisce_cuan.source import GitMirrorPublisher
 
@@ -277,6 +278,27 @@ def create_parser() -> argparse.ArgumentParser:
         dest="sdist_path",
         help="Legacy alias for --source-path",
     )
+    parser.add_argument(
+        "--source-type",
+        default="pypi-sdist",
+        dest="source_type",
+        help="canonical_source.type for this package version — pypi-sdist or git",
+    )
+    parser.add_argument(
+        "--upstream-url",
+        default="",
+        dest="upstream_url",
+        help="Upstream git repository URL, required when --source-type=git",
+    )
+    parser.add_argument(
+        "--upstream-ref",
+        default="",
+        dest="upstream_ref",
+        help=(
+            "Git ref (tag, branch, or commit SHA) to mirror, "
+            "required when --source-type=git"
+        ),
+    )
     parser.add_argument("--data-dir", default="/var/workdir")
     parser.add_argument("--files-dir", default="files")
     parser.add_argument("--package", default="")
@@ -327,11 +349,30 @@ def main(argv: list[str] | None = None) -> int:
 
     apply_ca_bundle(Path(args.ca_bundle))
 
-    source_path = resolve_source_path(args)
-    if source_path is None or not source_path.is_file():
-        logger.error("Source archive does not exist: %s", source_path)
-        return 1
-    logger.info("Source archive: %s", source_path)
+    is_git_source = args.source_type == "git"
+    source_path: Path | None = None
+
+    if is_git_source:
+        missing = [
+            name
+            for name, value in (
+                ("--package", args.package),
+                ("--version", args.version),
+                ("--upstream-url", args.upstream_url),
+                ("--upstream-ref", args.upstream_ref),
+            )
+            if not value
+        ]
+        if missing:
+            logger.error("source-type=git requires %s", ", ".join(missing))
+            return 1
+        package, version = args.package, args.version
+    else:
+        source_path = resolve_source_path(args)
+        if source_path is None or not source_path.is_file():
+            logger.error("Source archive does not exist: %s", source_path)
+            return 1
+        logger.info("Source archive: %s", source_path)
 
     signing_secret_dir = Path(args.signing_secret_dir)
     auth_token = read_git_auth_token(Path(args.git_secret_dir))
@@ -347,15 +388,16 @@ def main(argv: list[str] | None = None) -> int:
     else:
         logger.info("No sign key configured; attestation signing will be skipped")
 
-    try:
-        package, version = resolve_package_version(
-            source_path,
-            args.package or None,
-            args.version or None,
-        )
-    except Exception as e:
-        logger.error("Failed to discover package metadata: %s", e)
-        return 1
+    if not is_git_source:
+        try:
+            package, version = resolve_package_version(
+                source_path,
+                args.package or None,
+                args.version or None,
+            )
+        except Exception as e:
+            logger.error("Failed to discover package metadata: %s", e)
+            return 1
 
     logger.info("Publishing %s==%s", package, version)
 
@@ -397,19 +439,32 @@ def main(argv: list[str] | None = None) -> int:
                 "No public key configured; RHTL provenance verification will be skipped"
             )
         try:
-            tag_name = publisher.publish_source(
-                source_path=source_path,
-                package=package,
-                version=version,
-                workspace_dir=Path(args.workspace_dir),
-                sign_key=sign_key,
-                provenance_path=(
-                    Path(args.provenance_path) if args.provenance_path else None
-                ),
-                public_key=public_key,
-                rhtl_predicate_type=args.rhtl_predicate_type or None,
-                dry_run=args.dry_run,
-            )
+            if is_git_source:
+                request = PublishGitSourceRequest(
+                    upstream_url=args.upstream_url,
+                    ref=args.upstream_ref,
+                    package=package,
+                    version=version,
+                    workspace_dir=Path(args.workspace_dir),
+                    sign_key=sign_key,
+                    public_key=public_key,
+                    dry_run=args.dry_run,
+                )
+                tag_name = publisher.publish_git_source(request).tag_name
+            else:
+                tag_name = publisher.publish_source(
+                    source_path=source_path,
+                    package=package,
+                    version=version,
+                    workspace_dir=Path(args.workspace_dir),
+                    sign_key=sign_key,
+                    provenance_path=(
+                        Path(args.provenance_path) if args.provenance_path else None
+                    ),
+                    public_key=public_key,
+                    rhtl_predicate_type=args.rhtl_predicate_type or None,
+                    dry_run=args.dry_run,
+                )
             logger.info(
                 "Successfully published %s==%s with tag %s", package, version, tag_name
             )
