@@ -48,6 +48,23 @@ def test_fetch_git_source_returns_1_on_clone_failure(tmp_path, monkeypatch):
     assert rc == 1
 
 
+def _param_block(task: str, param_name: str) -> str:
+    """Return the text of a single `- name: <param_name>` param entry, from
+    just after its `- name:` line up to (but excluding) the next `- name:`
+    param entry or the `results:` section -- whichever comes first. Scanning
+    the whole span (not just the line immediately after `description:`)
+    means this catches a `default:` line no matter where within the entry
+    it's added."""
+    marker = f"- name: {param_name}\n"
+    start = task.index(marker)
+    rest = task[start + len(marker) :]
+    next_param_idx = rest.find("- name:")
+    next_results_idx = rest.find("results:")
+    boundaries = [i for i in (next_param_idx, next_results_idx) if i != -1]
+    end = min(boundaries) if boundaries else len(rest)
+    return rest[:end]
+
+
 def test_fetch_git_source_task_yaml():
     task_path = (
         Path(__file__).parents[1]
@@ -56,20 +73,12 @@ def test_fetch_git_source_task_yaml():
     task = task_path.read_text()
 
     # upstreamUrl and ref must be required params -- no `default:` line
-    # immediately following their `description:` line.
+    # anywhere within their param entry.
     for param_name in ("upstreamUrl", "ref"):
-        param_start = task.index(f"- name: {param_name}\n")
-        param_block = task[param_start : param_start + 300]
-        lines = param_block.splitlines()
-        # lines: "- name: ...", "  description: ...", "  type: string",
-        # optionally "  default: ..."
-        description_idx = next(
-            i for i, line in enumerate(lines) if "description:" in line
-        )
-        next_line = lines[description_idx + 1]
-        assert "default:" not in next_line, (
-            f"{param_name} should not have a default immediately after its "
-            f"description (expected a required param)"
+        block = _param_block(task, param_name)
+        assert "default:" not in block, (
+            f"{param_name} should not have a default anywhere in its param "
+            f"entry (expected a required param)"
         )
 
     assert "taisce-cuan-fetch-git-source" in task
