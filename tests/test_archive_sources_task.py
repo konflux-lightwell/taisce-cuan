@@ -14,6 +14,17 @@ def test_archive_sources_push_source_step_uses_entrypoint():
     assert "taisce-cuan-push-source" in task
 
 
+def test_archive_sources_accepts_git_source_params():
+    task = TASK.read_text()
+
+    assert "name: sourceType" in task
+    assert "name: upstreamUrl" in task
+    assert "name: upstreamRef" in task
+    assert "--source-type=$(params.sourceType)" in task
+    assert "--upstream-url=$(params.upstreamUrl)" in task
+    assert "--upstream-ref=$(params.upstreamRef)" in task
+
+
 def test_archive_sources_mounts_signing_secret_read_only_and_optional():
     task = TASK.read_text()
     volume = task[

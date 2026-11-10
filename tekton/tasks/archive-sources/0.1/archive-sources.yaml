@@ -81,6 +81,18 @@ spec:
       description: Comma-separated list of GitLab user IDs allowed to create protected tags (e.g. '11111,22222'). When empty, tag protection is skipped.
       type: string
       default: ""
+    - name: sourceType
+      description: canonical_source.type for this package version — pypi-sdist or git
+      type: string
+      default: "pypi-sdist"
+    - name: upstreamUrl
+      description: Upstream git repository URL, required when sourceType is git
+      type: string
+      default: ""
+    - name: upstreamRef
+      description: Git ref (tag, branch, or commit SHA) to mirror, required when sourceType is git
+      type: string
+      default: ""
     - name: signingSecretName
       description: Name of secret containing SIGN_KEY, PUBLIC_KEY, and/or cosign credentials (optional).
       type: string
@@ -211,3 +223,6 @@ spec:
         - --rhtl-predicate-type=$(params.rhtlPredicateType)
         - --tag-protection-user-ids=$(params.tagProtectionUserIds)
         - --workspace-dir=$(params.dataDir)/work
+        - --source-type=$(params.sourceType)
+        - --upstream-url=$(params.upstreamUrl)
+        - --upstream-ref=$(params.upstreamRef)

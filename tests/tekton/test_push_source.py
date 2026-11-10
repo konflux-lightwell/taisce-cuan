@@ -1,7 +1,7 @@
 import argparse
 import os
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -323,6 +323,136 @@ def test_main_omits_tag_protection_user_ids_when_empty(tmp_path, monkeypatch):
         )
 
     assert "tag_protection_user_ids" not in MockPublisher.call_args[1]
+
+
+def test_main_git_source_calls_publish_git_source(tmp_path, monkeypatch):
+    monkeypatch.delenv("SIGN_KEY", raising=False)
+    monkeypatch.delenv("PUBLIC_KEY", raising=False)
+
+    with patch("taisce_cuan.tekton.push_source.GitMirrorPublisher") as MockPublisher:
+        MockPublisher.return_value.publish_git_source.return_value = Mock(
+            tag_name="griffe/2.3.2"
+        )
+
+        rc = main(
+            [
+                "--source-type",
+                "git",
+                "--upstream-url",
+                "https://github.com/mkdocstrings/griffe",
+                "--upstream-ref",
+                "2.3.2",
+                "--package",
+                "griffe",
+                "--version",
+                "2.3.2",
+                "--forge-url",
+                "https://gitlab.example.com",
+                "--group",
+                "lightwell/builds",
+                "--committer-name",
+                "Bot",
+                "--committer-email",
+                "bot@example.com",
+                "--workspace-dir",
+                str(tmp_path / "work"),
+                "--git-secret-dir",
+                str(tmp_path / "nosecrets"),
+                "--signing-secret-dir",
+                str(tmp_path / "nosigning"),
+                "--ca-bundle",
+                str(tmp_path / "noca.crt"),
+            ]
+        )
+
+    assert rc == 0
+    MockPublisher.return_value.publish_git_source.assert_called_once()
+    request = MockPublisher.return_value.publish_git_source.call_args[0][0]
+    assert request.upstream_url == "https://github.com/mkdocstrings/griffe"
+    assert request.ref == "2.3.2"
+    assert request.package == "griffe"
+    assert request.version == "2.3.2"
+    MockPublisher.return_value.publish_source.assert_not_called()
+
+
+def test_main_git_source_requires_package_version_url_ref(tmp_path, monkeypatch):
+    monkeypatch.delenv("SIGN_KEY", raising=False)
+    monkeypatch.delenv("PUBLIC_KEY", raising=False)
+
+    with patch("taisce_cuan.tekton.push_source.GitMirrorPublisher") as MockPublisher:
+        rc = main(
+            [
+                "--source-type",
+                "git",
+                "--upstream-url",
+                "https://github.com/mkdocstrings/griffe",
+                # --upstream-ref intentionally omitted
+                "--package",
+                "griffe",
+                "--version",
+                "2.3.2",
+                "--forge-url",
+                "https://gitlab.example.com",
+                "--group",
+                "lightwell/builds",
+                "--committer-name",
+                "Bot",
+                "--committer-email",
+                "bot@example.com",
+                "--workspace-dir",
+                str(tmp_path / "work"),
+                "--git-secret-dir",
+                str(tmp_path / "nosecrets"),
+                "--signing-secret-dir",
+                str(tmp_path / "nosigning"),
+                "--ca-bundle",
+                str(tmp_path / "noca.crt"),
+            ]
+        )
+
+    assert rc == 1
+    MockPublisher.assert_not_called()
+
+
+def test_main_sdist_route_unchanged_when_source_type_omitted(tmp_path, monkeypatch):
+    source = tmp_path / "sniffio-1.3.1.tar.gz"
+    source.touch()
+    monkeypatch.delenv("SIGN_KEY", raising=False)
+    monkeypatch.delenv("PUBLIC_KEY", raising=False)
+
+    with patch("taisce_cuan.tekton.push_source.GitMirrorPublisher") as MockPublisher:
+        MockPublisher.return_value.publish_source.return_value = "sniffio/1.3.1"
+
+        rc = main(
+            [
+                "--source-path",
+                str(source),
+                "--package",
+                "sniffio",
+                "--version",
+                "1.3.1",
+                "--forge-url",
+                "https://gitlab.example.com",
+                "--group",
+                "lightwell/builds",
+                "--committer-name",
+                "Bot",
+                "--committer-email",
+                "bot@example.com",
+                "--workspace-dir",
+                str(tmp_path / "work"),
+                "--git-secret-dir",
+                str(tmp_path / "nosecrets"),
+                "--signing-secret-dir",
+                str(tmp_path / "nosigning"),
+                "--ca-bundle",
+                str(tmp_path / "noca.crt"),
+            ]
+        )
+
+    assert rc == 0
+    MockPublisher.return_value.publish_source.assert_called_once()
+    MockPublisher.return_value.publish_git_source.assert_not_called()
 
 
 def test_main_returns_1_when_source_file_missing(tmp_path, monkeypatch):
