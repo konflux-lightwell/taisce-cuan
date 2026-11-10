@@ -1,0 +1,23 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "enabledManagers": ["tekton"],
+  "automerge": false,
+  "tekton": {
+    "managerFilePatterns": ["/^tekton/tasks/.*\\.ya?ml$/"]
+  },
+  "packageRules": [
+    {
+      "matchManagers": ["tekton"],
+      "enabled": false
+    },
+    {
+      "matchManagers": ["tekton"],
+      "matchPackageNames": ["quay.io/light-factory/taisce-cuan"],
+      "enabled": true,
+      "pinDigests": true,
+      "automerge": false,
+      "groupName": "taisce-cuan task images"
+    }
+  ]
+}
