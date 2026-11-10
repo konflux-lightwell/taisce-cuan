@@ -34,6 +34,9 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 _ARCHIVE_EXTENSIONS = (".tar.gz", ".tar.bz2", ".tar.xz", ".zip")
+# "" is accepted as an alias for the default sdist route (--source-type is
+# optional and omitted entirely in most real invocations).
+_KNOWN_SOURCE_TYPES = frozenset({"pypi-sdist", "git", ""})
 
 
 def apply_ca_bundle(ca_bundle: Path) -> None:
@@ -349,6 +352,14 @@ def main(argv: list[str] | None = None) -> int:
 
     apply_ca_bundle(Path(args.ca_bundle))
 
+    if args.source_type not in _KNOWN_SOURCE_TYPES:
+        logger.error(
+            "Unknown --source-type %r; expected one of %s",
+            args.source_type,
+            ", ".join(sorted(t for t in _KNOWN_SOURCE_TYPES if t)),
+        )
+        return 1
+
     is_git_source = args.source_type == "git"
     source_path: Path | None
 
@@ -368,6 +379,20 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         package, version = args.package, args.version
         source_path = None
+        ignored = [
+            name
+            for name, value in (
+                ("--provenance-path", args.provenance_path),
+                ("--rhtl-predicate-type", args.rhtl_predicate_type),
+                ("--source-path", args.source_path),
+                ("--sdist-path", args.sdist_path),
+            )
+            if value
+        ]
+        if ignored:
+            logger.info(
+                "source-type=git ignores %s (sdist-route only)", ", ".join(ignored)
+            )
     else:
         source_path = resolve_source_path(args)
         if source_path is None or not source_path.is_file():
