@@ -71,11 +71,11 @@ spec:
       image: quay.io/light-castle/taisce-cuan:latest
       computeResources:
         limits:
-          memory: 256Mi
-          cpu: 200m
+          memory: 4Gi
+          cpu: "1"
         requests:
-          memory: 128Mi
-          cpu: 50m
+          memory: 256Mi
+          cpu: 100m
       command:
         - taisce-cuan-fetch-git-source
       args:
