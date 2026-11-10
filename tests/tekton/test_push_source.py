@@ -375,11 +375,16 @@ def test_main_git_source_calls_publish_git_source(tmp_path, monkeypatch):
     MockPublisher.return_value.publish_source.assert_not_called()
 
 
-def test_main_git_source_requires_package_version_url_ref(tmp_path, monkeypatch):
+def test_main_git_source_requires_package_version_url_ref(
+    tmp_path, monkeypatch, caplog
+):
     monkeypatch.delenv("SIGN_KEY", raising=False)
     monkeypatch.delenv("PUBLIC_KEY", raising=False)
 
-    with patch("taisce_cuan.tekton.push_source.GitMirrorPublisher") as MockPublisher:
+    with (
+        patch("taisce_cuan.tekton.push_source.GitMirrorPublisher") as MockPublisher,
+        caplog.at_level("ERROR"),
+    ):
         rc = main(
             [
                 "--source-type",
@@ -412,6 +417,11 @@ def test_main_git_source_requires_package_version_url_ref(tmp_path, monkeypatch)
 
     assert rc == 1
     MockPublisher.assert_not_called()
+    assert any(
+        "source-type=git requires" in record.getMessage()
+        and "--upstream-ref" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_main_sdist_route_unchanged_when_source_type_omitted(tmp_path, monkeypatch):
