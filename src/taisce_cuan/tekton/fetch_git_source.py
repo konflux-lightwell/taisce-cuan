@@ -72,18 +72,25 @@ def main(argv: list[str] | None = None) -> int:
         0 on success, 1 on failure.
     """
     args = create_parser().parse_args(argv)
+    redacted_url = git_source._redact_url_credentials(args.upstream_url)
 
     logger.info(
         "Fetching %s==%s from %s@%s",
         args.package,
         args.version,
-        args.upstream_url,
+        redacted_url,
         args.ref,
     )
     logger.info("Output directory: %s", args.output_dir)
 
+    output_dir = Path(args.output_dir)
     try:
-        with tempfile.TemporaryDirectory() as workspace_dir:
+        # Land the clone (and archive_git_source_to_dir's temporary tar) under
+        # the output directory's parent -- the provisioned /var/workdir
+        # emptyDir in a real Tekton pod -- rather than the default system
+        # temp dir, which is a small tmpfs there. See
+        # archive_git_source_to_dir's docstring for why tmpfs is avoided.
+        with tempfile.TemporaryDirectory(dir=output_dir.parent) as workspace_dir:
             cloned = git_source.clone_and_resolve_git_source(
                 args.upstream_url,
                 args.ref,
@@ -91,13 +98,13 @@ def main(argv: list[str] | None = None) -> int:
                 package=args.package,
                 version=args.version,
             )
-            git_source.archive_git_source_to_dir(cloned, Path(args.output_dir))
+            git_source.archive_git_source_to_dir(cloned, output_dir)
     except Exception as e:
         logger.error(
             "Failed to fetch %s==%s from %s@%s: %s",
             args.package,
             args.version,
-            args.upstream_url,
+            redacted_url,
             args.ref,
             e,
         )
@@ -107,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
         "Successfully fetched %s==%s from %s@%s: resolved to %s",
         args.package,
         args.version,
-        args.upstream_url,
+        redacted_url,
         args.ref,
         cloned.resolved_sha,
     )
