@@ -30,6 +30,24 @@ def test_fetch_git_source_writes_resolved_sha_result(tmp_path, monkeypatch):
     assert result_path.read_text() == "a" * 40
 
 
+def test_fetch_git_source_returns_1_on_clone_failure(tmp_path, monkeypatch):
+    from taisce_cuan.source import git_source as git_source_mod
+
+    def fake_clone(upstream_url, ref, workspace_dir, *, package, version):
+        raise RuntimeError("clone failed")
+
+    monkeypatch.setattr(git_source_mod, "clone_and_resolve_git_source", fake_clone)
+
+    rc = main([
+        "griffe", "2.3.2",
+        "--upstream-url=https://github.com/mkdocstrings/griffe",
+        "--ref=2.3.2",
+        f"--output-dir={tmp_path / 'source-repo'}",
+    ])
+
+    assert rc == 1
+
+
 def test_fetch_git_source_task_yaml():
     task_path = (
         Path(__file__).parents[1]
