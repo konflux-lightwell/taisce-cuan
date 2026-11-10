@@ -350,7 +350,7 @@ def main(argv: list[str] | None = None) -> int:
     apply_ca_bundle(Path(args.ca_bundle))
 
     is_git_source = args.source_type == "git"
-    source_path: Path | None = None
+    source_path: Path | None
 
     if is_git_source:
         missing = [
@@ -367,12 +367,24 @@ def main(argv: list[str] | None = None) -> int:
             logger.error("source-type=git requires %s", ", ".join(missing))
             return 1
         package, version = args.package, args.version
+        source_path = None
     else:
         source_path = resolve_source_path(args)
         if source_path is None or not source_path.is_file():
             logger.error("Source archive does not exist: %s", source_path)
             return 1
         logger.info("Source archive: %s", source_path)
+        try:
+            package, version = resolve_package_version(
+                source_path,
+                args.package or None,
+                args.version or None,
+            )
+        except Exception as e:
+            logger.error("Failed to discover package metadata: %s", e)
+            return 1
+
+    logger.info("Publishing %s==%s", package, version)
 
     signing_secret_dir = Path(args.signing_secret_dir)
     auth_token = read_git_auth_token(Path(args.git_secret_dir))
@@ -387,19 +399,6 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("Sign key: %s", sign_key)
     else:
         logger.info("No sign key configured; attestation signing will be skipped")
-
-    if not is_git_source:
-        try:
-            package, version = resolve_package_version(
-                source_path,
-                args.package or None,
-                args.version or None,
-            )
-        except Exception as e:
-            logger.error("Failed to discover package metadata: %s", e)
-            return 1
-
-    logger.info("Publishing %s==%s", package, version)
 
     forge_url = args.forge_url or args.gitlab_url
     group = args.group or args.gitlab_group
