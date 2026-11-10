@@ -325,6 +325,105 @@ def test_main_omits_tag_protection_user_ids_when_empty(tmp_path, monkeypatch):
     assert "tag_protection_user_ids" not in MockPublisher.call_args[1]
 
 
+def test_main_rejects_unknown_source_type(tmp_path, monkeypatch, caplog):
+    monkeypatch.delenv("SIGN_KEY", raising=False)
+    monkeypatch.delenv("PUBLIC_KEY", raising=False)
+
+    with (
+        patch("taisce_cuan.tekton.push_source.GitMirrorPublisher") as MockPublisher,
+        caplog.at_level("ERROR"),
+    ):
+        rc = main(
+            [
+                "--source-type",
+                "Git",
+                "--upstream-url",
+                "https://github.com/mkdocstrings/griffe",
+                "--upstream-ref",
+                "2.3.2",
+                "--package",
+                "griffe",
+                "--version",
+                "2.3.2",
+                "--forge-url",
+                "https://gitlab.example.com",
+                "--group",
+                "lightwell/builds",
+                "--committer-name",
+                "Bot",
+                "--committer-email",
+                "bot@example.com",
+                "--workspace-dir",
+                str(tmp_path / "work"),
+                "--git-secret-dir",
+                str(tmp_path / "nosecrets"),
+                "--signing-secret-dir",
+                str(tmp_path / "nosigning"),
+                "--ca-bundle",
+                str(tmp_path / "noca.crt"),
+            ]
+        )
+
+    assert rc == 1
+    MockPublisher.assert_not_called()
+    assert any(
+        "Unknown --source-type" in record.getMessage() for record in caplog.records
+    )
+
+
+def test_main_git_source_logs_ignored_sdist_only_flags(tmp_path, monkeypatch, caplog):
+    monkeypatch.delenv("SIGN_KEY", raising=False)
+    monkeypatch.delenv("PUBLIC_KEY", raising=False)
+
+    with (
+        patch("taisce_cuan.tekton.push_source.GitMirrorPublisher") as MockPublisher,
+        caplog.at_level("INFO"),
+    ):
+        MockPublisher.return_value.publish_git_source.return_value = Mock(
+            tag_name="griffe/2.3.2"
+        )
+
+        rc = main(
+            [
+                "--source-type",
+                "git",
+                "--upstream-url",
+                "https://github.com/mkdocstrings/griffe",
+                "--upstream-ref",
+                "2.3.2",
+                "--package",
+                "griffe",
+                "--version",
+                "2.3.2",
+                "--forge-url",
+                "https://gitlab.example.com",
+                "--group",
+                "lightwell/builds",
+                "--committer-name",
+                "Bot",
+                "--committer-email",
+                "bot@example.com",
+                "--workspace-dir",
+                str(tmp_path / "work"),
+                "--git-secret-dir",
+                str(tmp_path / "nosecrets"),
+                "--signing-secret-dir",
+                str(tmp_path / "nosigning"),
+                "--ca-bundle",
+                str(tmp_path / "noca.crt"),
+                "--rhtl-predicate-type",
+                "https://example.com/predicate",
+            ]
+        )
+
+    assert rc == 0
+    assert any(
+        "ignores" in record.getMessage()
+        and "--rhtl-predicate-type" in record.getMessage()
+        for record in caplog.records
+    )
+
+
 def test_main_git_source_calls_publish_git_source(tmp_path, monkeypatch):
     monkeypatch.delenv("SIGN_KEY", raising=False)
     monkeypatch.delenv("PUBLIC_KEY", raising=False)
