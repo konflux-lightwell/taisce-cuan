@@ -1,0 +1,103 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: fetch-git-source
+  labels:
+    app.kubernetes.io/name: fetch-git-source
+    app.kubernetes.io/part-of: lightwell
+    # Required by tkn-bundle-oci-ta; becomes the published catalog version.
+    app.kubernetes.io/version: "0.1"
+spec:
+  description: |-
+    Clones an upstream git repository, resolves a ref (tag, branch, or commit) to its exact commit SHA,
+    archives that commit's tree, and packages it into a Trusted Artifact (SOURCE_ARTIFACT).
+  params:
+    - name: packageName
+      description: Package name (e.g. griffe).
+      type: string
+    - name: packageVersion
+      description: Package version (e.g. 2.3.2).
+      type: string
+    - name: upstreamUrl
+      description: URL of the upstream git repository to clone.
+      type: string
+    - name: ref
+      description: Git ref (tag, branch, or commit) to resolve.
+      type: string
+    - name: ociStorage
+      description: OCI reference used as the store for Trusted Artifacts.
+      type: string
+      default: ""
+    - name: ociArtifactExpiresAfter
+      description: Expiration for Trusted Artifact OCI objects.
+      type: string
+      default: ""
+    - name: caTrustConfigMapName
+      description: The name of the ConfigMap to read CA bundle data from.
+      type: string
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      description: The name of the key in the ConfigMap that contains the CA bundle data.
+      type: string
+      default: ca-bundle.crt
+  results:
+    - name: resolvedSha
+      description: Exact commit SHA upstreamUrl@ref resolved to.
+    - name: SOURCE_ARTIFACT
+      description: Trusted Artifact URI pointing to the archived git checkout.
+  volumes:
+    - name: trusted-ca
+      configMap:
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        name: $(params.caTrustConfigMapName)
+        optional: true
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    env:
+      - name: HOME
+        value: /tekton/home
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+      - mountPath: /mnt/trusted-ca
+        name: trusted-ca
+        readOnly: true
+  steps:
+    - name: fetch-git-source
+      image: quay.io/light-castle/taisce-cuan:latest
+      computeResources:
+        limits:
+          memory: 256Mi
+          cpu: 200m
+        requests:
+          memory: 128Mi
+          cpu: 50m
+      command:
+        - taisce-cuan-fetch-git-source
+      args:
+        - $(params.packageName)
+        - $(params.packageVersion)
+        - --upstream-url=$(params.upstreamUrl)
+        - --ref=$(params.ref)
+        - --output-dir=/var/workdir/source-repo
+        - --result-path=$(results.resolvedSha.path)
+
+    - name: create-source-artifact
+      image: quay.io/konflux-ci/build-trusted-artifacts:latest@sha256:2712c8a6453fc9db5fc4c2d9d952554a4eea46d2fdba47a272b79fa07f8c8c40
+      env:
+        - name: IMAGE_EXPIRES_AFTER
+          value: $(params.ociArtifactExpiresAfter)
+      args:
+        - create
+        - --store
+        - $(params.ociStorage)
+        - $(results.SOURCE_ARTIFACT.path)=/var/workdir/source-repo
+      volumeMounts:
+        - mountPath: /etc/pki/tls/certs/ca-custom-bundle.crt
+          name: trusted-ca
+          readOnly: true
+          subPath: ca-bundle.crt
