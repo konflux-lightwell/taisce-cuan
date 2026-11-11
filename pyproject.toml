@@ -23,6 +23,7 @@ taisce-cuan = "taisce_cuan.cli:main"
 taisce-cuan-fetch-sdist = "taisce_cuan.tekton.fetch_sdist:main"
 taisce-cuan-fetch-git-source = "taisce_cuan.tekton.fetch_git_source:main"
 taisce-cuan-push-source = "taisce_cuan.tekton.push_source:main"
+taisce-cuan-package-git-source-image = "taisce_cuan.tekton.package_git_source_image:main"
 
 [dependency-groups]
 dev = [

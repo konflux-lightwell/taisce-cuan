@@ -1,0 +1,118 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: package-git-source-image
+  labels:
+    app.kubernetes.io/name: package-git-source-image
+    app.kubernetes.io/version: "0.1"
+    app.kubernetes.io/part-of: lightwell
+spec:
+  description: |-
+    Packages a fetched git source checkout (a Trusted Artifact, e.g. from fetch-git-source)
+    as an OCI artifact Snapshot. Counterpart to the sdist route's fromager-build-sdist
+    normalization step, but with no sdist-specific logic — the git checkout is pushed as-is.
+  params:
+    - name: SOURCE_ARTIFACT
+      description: Trusted Artifact URI containing the fetched git source tree.
+      type: string
+    - name: PACKAGE
+      description: Canonical Python package name (PEP 503 normalized).
+      type: string
+    - name: VERSION
+      description: Package version string.
+      type: string
+    - name: IMAGE
+      description: Destination reference of the OCI git-source artifact to produce.
+      type: string
+    - name: IMAGE_EXPIRES_AFTER
+      description: Delete image tag after specified time. Empty means keep.
+      type: string
+      default: ""
+    - name: caTrustConfigMapName
+      description: Name of the ConfigMap to read CA bundle data from.
+      type: string
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      description: Key in caTrustConfigMapName containing the CA bundle.
+      type: string
+      default: ca-bundle.crt
+    - name: git-url
+      description: Immutable source git repository URL for Konflux Snapshot attribution.
+      type: string
+    - name: revision
+      description: Full immutable source commit revision for Konflux Snapshot attribution.
+      type: string
+  results:
+    - name: IMAGE_URL
+      description: OCI artifact repository and tag where the git source was pushed.
+    - name: IMAGE_DIGEST
+      description: Digest of the git-source OCI artifact.
+    - name: IMAGE_REF
+      description: Full OCI reference (repo@digest) of the git-source artifact.
+    - name: CHAINS-GIT_URL
+      description: Source git repository URL for Tekton Chains / Snapshot.
+    - name: CHAINS-GIT_COMMIT
+      description: Git commit SHA for Tekton Chains / Snapshot.
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        optional: true
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+  stepTemplate:
+    securityContext:
+      runAsUser: 1001
+    env:
+      - name: HOME
+        value: /tekton/home
+    volumeMounts:
+      - name: workdir
+        mountPath: /var/workdir
+      - name: trusted-ca
+        mountPath: "/mnt/trusted-ca"
+        readOnly: true
+  steps:
+    - name: use-source-artifact
+      image: quay.io/konflux-ci/build-trusted-artifacts:latest@sha256:2712c8a6453fc9db5fc4c2d9d952554a4eea46d2fdba47a272b79fa07f8c8c40
+      args:
+        - use
+        - $(params.SOURCE_ARTIFACT)=/var/workdir/source-repo
+      volumeMounts:
+        - mountPath: /etc/pki/tls/certs/ca-custom-bundle.crt
+          name: trusted-ca
+          readOnly: true
+          subPath: ca-bundle.crt
+    - name: create-oci-artifact
+      image: quay.io/light-castle/taisce-cuan:latest
+      computeResources:
+        limits:
+          cpu: "1"
+          memory: 512Mi
+        requests:
+          cpu: 100m
+          memory: 128Mi
+      command:
+        - taisce-cuan-package-git-source-image
+      args:
+        - --image=$(params.IMAGE)
+        - --source-dir=/var/workdir/source-repo
+        - --package=$(params.PACKAGE)
+        - --version=$(params.VERSION)
+        - --image-expires-after=$(params.IMAGE_EXPIRES_AFTER)
+        - --git-url=$(params.git-url)
+        - --revision=$(params.revision)
+        - --image-url-result-path=$(results.IMAGE_URL.path)
+        - --image-digest-result-path=$(results.IMAGE_DIGEST.path)
+        - --image-ref-result-path=$(results.IMAGE_REF.path)
+        - --chains-git-url-result-path=$(results.CHAINS-GIT_URL.path)
+        - --chains-git-commit-result-path=$(results.CHAINS-GIT_COMMIT.path)
+      volumeMounts:
+        - mountPath: /etc/pki/tls/certs/ca-custom-bundle.crt
+          name: trusted-ca
+          readOnly: true
+          subPath: ca-bundle.crt
