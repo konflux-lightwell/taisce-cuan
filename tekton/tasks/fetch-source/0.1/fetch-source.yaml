@@ -66,7 +66,7 @@ spec:
         readOnly: true
   steps:
     - name: fetch-sdist
-      image: quay.io/light-factory/taisce-cuan:latest@sha256:4ab5b331fcf43812a3fda7cb7d279d16a37612f2656a34a3408a1e82f0d2afff
+      image: quay.io/light-factory/taisce-cuan:latest@sha256:6913a6bacc4bef442aa97bc50e90a61c6d942e3a985a8bdd962f56a33ec29556
       computeResources:
         limits:
           memory: 256Mi

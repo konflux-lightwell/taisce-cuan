@@ -88,7 +88,7 @@ spec:
           readOnly: true
           subPath: ca-bundle.crt
     - name: create-oci-artifact
-      image: quay.io/light-castle/taisce-cuan:latest
+      image: quay.io/light-factory/taisce-cuan:latest@sha256:6913a6bacc4bef442aa97bc50e90a61c6d942e3a985a8bdd962f56a33ec29556
       computeResources:
         limits:
           cpu: "1"
