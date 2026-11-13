@@ -272,7 +272,7 @@ def create_parser() -> argparse.ArgumentParser:
         Configured argument parser.
     """
     parser = argparse.ArgumentParser(
-        description="Push source archive to Git forge — Tekton push-source step"
+        description="Push source archive to Git forge (Tekton push-source step)"
     )
     parser.add_argument("--source-path", default="", dest="source_path")
     parser.add_argument(
@@ -285,7 +285,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--source-type",
         default="pypi-sdist",
         dest="source_type",
-        help="canonical_source.type for this package version — pypi-sdist or git",
+        help="canonical_source.type for this package version: pypi-sdist or git",
     )
     parser.add_argument(
         "--upstream-url",
@@ -335,20 +335,42 @@ def create_parser() -> argparse.ArgumentParser:
         dest="tag_protection_user_ids",
         help="Comma-separated list of GitLab user IDs allowed to create protected tags",
     )
+    parser.add_argument("--mirror-policy", choices=["python-mirror"], default=None)
+    parser.add_argument(
+        "--tag-protection-bot-user-id",
+        type=int,
+        default=None,
+        help="GitLab user ID of the pipeline bot, required with --mirror-policy",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Push a source archive to a Git forge — Tekton push-source step.
+    """Push a source archive to a Git forge as a Tekton push-source step.
 
     Args:
         argv: Argument list; defaults to ``sys.argv[1:]`` when ``None``.
 
     Returns:
         0 on success, 1 on failure.
+
+    Raises:
+        SystemExit: The arguments are invalid, such as a mirror policy without
+            creator IDs. The exit status is 2.
     """
-    args = create_parser().parse_args(argv)
+    parser = create_parser()
+    args = parser.parse_args(argv)
+
+    # Reject a policy without creator IDs before the CA bundle or any publishing.
+    if args.mirror_policy:
+        if not any(value.strip() for value in args.tag_protection_user_ids.split(",")):
+            parser.error(
+                "--mirror-policy requires --tag-protection-user-ids "
+                "with at least one user ID"
+            )
+        if args.tag_protection_bot_user_id is None:
+            parser.error("--mirror-policy requires --tag-protection-bot-user-id")
 
     apply_ca_bundle(Path(args.ca_bundle))
 
@@ -441,19 +463,33 @@ def main(argv: list[str] | None = None) -> int:
         publisher_kwargs["auth_token"] = auth_token
     if args.remote_url:
         publisher_kwargs["remote_url"] = args.remote_url
-    if args.tag_protection_user_ids:
-        tag_protection_user_ids = [
-            int(x.strip()) for x in args.tag_protection_user_ids.split(",") if x.strip()
-        ]
-        publisher_kwargs["tag_protection_user_ids"] = tag_protection_user_ids
-        logger.info("Tag protection user IDs: %s", tag_protection_user_ids)
-    else:
-        logger.info("Tag protection user IDs: none configured, skipping")
+    try:
+        if args.tag_protection_user_ids:
+            try:
+                tag_protection_user_ids = [
+                    int(x.strip())
+                    for x in args.tag_protection_user_ids.split(",")
+                    if x.strip()
+                ]
+            except ValueError:
+                raise ValueError("Invalid tag protection user IDs") from None
+            publisher_kwargs["tag_protection_user_ids"] = tag_protection_user_ids
+            logger.info("Tag protection user IDs: %s", tag_protection_user_ids)
+        else:
+            logger.info("Tag protection user IDs: none configured, skipping")
+        policy = getattr(args, "mirror_policy", None)
+        if policy is not None:
+            publisher_kwargs["mirror_policy"] = policy
+            publisher_kwargs["tag_protection_bot_user_id"] = (
+                args.tag_protection_bot_user_id
+            )
+        publisher = GitMirrorPublisher(**publisher_kwargs)
+    except Exception as e:
+        logger.error("Failed to configure publisher: %s", e)
+        return 1
 
     if args.dry_run:
         logger.info("Dry-run mode: git push will be skipped")
-
-    publisher = GitMirrorPublisher(**publisher_kwargs)
 
     with resolve_public_key(signing_secret_dir) as public_key:
         if public_key:

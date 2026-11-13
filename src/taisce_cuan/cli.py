@@ -31,6 +31,7 @@ logger = logging.getLogger("taisce-cuan")
 
 
 def create_parser() -> argparse.ArgumentParser:
+    """Build the command-line parser for ingestion and policy reconciliation."""
     parser = argparse.ArgumentParser(
         prog="taisce-cuan",
         description=(
@@ -151,6 +152,13 @@ def create_parser() -> argparse.ArgumentParser:
             "(e.g. '11111,22222')"
         ),
     )
+    push_parser.add_argument("--mirror-policy", choices=["python-mirror"], default=None)
+    push_parser.add_argument(
+        "--tag-protection-bot-user-id",
+        type=int,
+        default=os.getenv("TAG_PROTECTION_BOT_USER_ID"),
+        help="GitLab user ID of the pipeline bot, required with --mirror-policy",
+    )
     push_parser.add_argument(
         "--dry-run", action="store_true", help="Do not push to remote"
     )
@@ -219,8 +227,37 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     push_git_source_parser.add_argument(
+        "--mirror-policy", choices=["python-mirror"], default=None
+    )
+    push_git_source_parser.add_argument(
+        "--tag-protection-bot-user-id",
+        type=int,
+        default=os.getenv("TAG_PROTECTION_BOT_USER_ID"),
+        help="GitLab user ID of the pipeline bot, required with --mirror-policy",
+    )
+    push_git_source_parser.add_argument(
         "--dry-run", action="store_true", help="Do not push to remote"
     )
+
+    reconcile_parser = subparsers.add_parser(
+        "reconcile-mirrors", help="Inspect or provision the selected mirror policy"
+    )
+    reconcile_parser.add_argument("--group", required=True)
+    reconcile_parser.add_argument(
+        "--mirror-policy", required=True, choices=["python-mirror"]
+    )
+    reconcile_parser.add_argument("--tag-protection-user-ids", required=True)
+    reconcile_parser.add_argument(
+        "--tag-protection-bot-user-id", required=True, type=int
+    )
+    reconcile_parser.add_argument("--report", required=True, type=Path)
+    reconcile_parser.add_argument("--forge-url", required=True)
+    reconcile_parser.add_argument(
+        "--auth-token", default=os.getenv("GITLAB_TOKEN") or os.getenv("GIT_AUTH_TOKEN")
+    )
+    reconcile_parser.add_argument("--apply", action="store_true")
+    reconcile_parser.add_argument("--max-projects", type=int, default=None)
+    reconcile_parser.add_argument("--after-project-id", type=int, default=None)
 
     return parser
 
@@ -243,7 +280,19 @@ def handle_fetch(args: argparse.Namespace) -> int:
         return 1
 
 
+def _policy_kwargs(args: argparse.Namespace) -> dict:
+    """Return publisher kwargs for an explicit mirror policy, or none if unset."""
+    policy = getattr(args, "mirror_policy", None)
+    if policy is None:
+        return {}
+    return {
+        "mirror_policy": policy,
+        "tag_protection_bot_user_id": args.tag_protection_bot_user_id,
+    }
+
+
 def handle_push(args: argparse.Namespace) -> int:
+    """Publish an archive and handle invalid publisher configuration."""
     source_path = Path(args.source)
     if not source_path.exists():
         logger.error(f"Source file does not exist: {source_path}")
@@ -267,21 +316,25 @@ def handle_push(args: argparse.Namespace) -> int:
             )
             return 1
 
-    tag_protection_user_ids = [
-        int(x.strip()) for x in args.tag_protection_user_ids.split(",") if x.strip()
-    ]
-
-    publisher = GitMirrorPublisher(
-        forge_url=args.forge_url,
-        group=args.group,
-        auth_token=args.auth_token,
-        committer_name=args.committer_name,
-        committer_email=args.committer_email,
-        remote_url=args.remote_url,
-        tag_protection_user_ids=tag_protection_user_ids,
-    )
-
     try:
+        try:
+            tag_protection_user_ids = [
+                int(x.strip())
+                for x in args.tag_protection_user_ids.split(",")
+                if x.strip()
+            ]
+        except ValueError:
+            raise ValueError("Invalid tag protection user IDs") from None
+        publisher = GitMirrorPublisher(
+            forge_url=args.forge_url,
+            group=args.group,
+            auth_token=args.auth_token,
+            committer_name=args.committer_name,
+            committer_email=args.committer_email,
+            remote_url=args.remote_url,
+            tag_protection_user_ids=tag_protection_user_ids,
+            **_policy_kwargs(args),
+        )
         tag_name = publisher.publish_source(
             source_path=source_path,
             package=package,
@@ -301,32 +354,36 @@ def handle_push(args: argparse.Namespace) -> int:
 
 
 def handle_push_git_source(args: argparse.Namespace) -> int:
-    tag_protection_user_ids = [
-        int(x.strip()) for x in args.tag_protection_user_ids.split(",") if x.strip()
-    ]
-
-    publisher = GitMirrorPublisher(
-        forge_url=args.forge_url,
-        group=args.group,
-        auth_token=args.auth_token,
-        committer_name=args.committer_name,
-        committer_email=args.committer_email,
-        remote_url=args.remote_url,
-        tag_protection_user_ids=tag_protection_user_ids,
-    )
-
-    request = PublishGitSourceRequest(
-        upstream_url=args.upstream_url,
-        ref=args.ref,
-        package=args.package,
-        version=args.version,
-        workspace_dir=Path(args.workspace_dir),
-        sign_key=args.sign_key,
-        public_key=args.public_key,
-        dry_run=args.dry_run,
-    )
-
+    """Publish a Git source and handle invalid publisher configuration."""
     try:
+        try:
+            tag_protection_user_ids = [
+                int(x.strip())
+                for x in args.tag_protection_user_ids.split(",")
+                if x.strip()
+            ]
+        except ValueError:
+            raise ValueError("Invalid tag protection user IDs") from None
+        publisher = GitMirrorPublisher(
+            forge_url=args.forge_url,
+            group=args.group,
+            auth_token=args.auth_token,
+            committer_name=args.committer_name,
+            committer_email=args.committer_email,
+            remote_url=args.remote_url,
+            tag_protection_user_ids=tag_protection_user_ids,
+            **_policy_kwargs(args),
+        )
+        request = PublishGitSourceRequest(
+            upstream_url=args.upstream_url,
+            ref=args.ref,
+            package=args.package,
+            version=args.version,
+            workspace_dir=Path(args.workspace_dir),
+            sign_key=args.sign_key,
+            public_key=args.public_key,
+            dry_run=args.dry_run,
+        )
         result = publisher.publish_git_source(request)
         logger.info(
             f"Successfully published {args.package} {args.version} "
@@ -339,8 +396,19 @@ def handle_push_git_source(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Dispatch a command and return its success or failure exit code."""
     parser = create_parser()
     args = parser.parse_args(argv)
+
+    # A policy without creator IDs would fail late, so reject it before any work.
+    if getattr(args, "mirror_policy", None):
+        if not any(value.strip() for value in args.tag_protection_user_ids.split(",")):
+            parser.error(
+                "--mirror-policy requires --tag-protection-user-ids "
+                "with at least one user ID"
+            )
+        if args.tag_protection_bot_user_id is None:
+            parser.error("--mirror-policy requires --tag-protection-bot-user-id")
 
     if args.command == "fetch":
         return handle_fetch(args)
@@ -348,6 +416,29 @@ def main(argv: list[str] | None = None) -> int:
         return handle_push(args)
     elif args.command == "push-git-source":
         return handle_push_git_source(args)
+    elif args.command == "reconcile-mirrors":
+        from taisce_cuan.source.reconcile import reconcile_mirrors
+
+        try:
+            release_ids = [
+                int(value.strip())
+                for value in args.tag_protection_user_ids.split(",")
+                if value.strip()
+            ]
+        except ValueError:
+            release_ids = []
+        return reconcile_mirrors(
+            forge_url=args.forge_url,
+            group=args.group,
+            auth_token=args.auth_token,
+            release_user_ids=release_ids,
+            bot_user_id=args.tag_protection_bot_user_id,
+            report_path=args.report,
+            mirror_policy=args.mirror_policy,
+            apply=args.apply,
+            max_projects=args.max_projects,
+            after_project_id=args.after_project_id,
+        )
     return 0
 
 

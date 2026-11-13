@@ -20,6 +20,7 @@ import gzip
 import hashlib
 import json
 import logging
+import re
 import shutil
 import subprocess
 import tempfile
@@ -54,6 +55,12 @@ from taisce_cuan.source.git_source import (
     ClonedGitSource,
     archive_git_source_to_dir,
     clone_and_resolve_git_source,
+)
+from taisce_cuan.source.mirror_policy import (
+    MirrorPolicyError,
+    _validated_project,
+    reconcile_tag_policy,
+    required_tag_rules,
 )
 
 logger = logging.getLogger(__name__)
@@ -101,7 +108,22 @@ class GitMirrorPublisher:
         committer_email: str = "lightwell@redhat.com",
         remote_url: str | None = None,
         tag_protection_user_ids: list[int] | None = None,
+        *,
+        mirror_policy: str | None = None,
+        tag_protection_bot_user_id: int | None = None,
     ):
+        """Configure the publisher and resolve any explicit tag policy."""
+        self.policy_rules = (
+            required_tag_rules(
+                mirror_policy,
+                forge_url,
+                group,
+                tag_protection_user_ids,
+                tag_protection_bot_user_id,
+            )
+            if mirror_policy is not None
+            else None
+        )
         self.forge_url = forge_url.rstrip("/")
         self.group = group.strip("/")
         self.auth_token = auth_token
@@ -115,10 +137,28 @@ class GitMirrorPublisher:
         self, client: httpx.Client, encoded_project: str, headers: dict
     ) -> tuple[str, int] | None:
         """GET a GitLab project. Returns (http_url_to_repo, project_id) or None."""
+        options = {"follow_redirects": False} if self.policy_rules is not None else {}
         resp = client.get(
             f"{self.forge_url}/api/v4/projects/{encoded_project}",
             headers=headers,
+            **options,
         )
+        if self.policy_rules is not None:
+            if resp.status_code == 404:
+                return None
+            if resp.status_code != 200:
+                raise MirrorPolicyError(
+                    f"GitLab project lookup failed: HTTP {resp.status_code}"
+                )
+            try:
+                data = resp.json()
+            except ValueError:
+                raise MirrorPolicyError(
+                    "GitLab project identity is malformed"
+                ) from None
+            return _validated_project(
+                data, self.forge_url, urllib.parse.unquote(encoded_project)
+            )
         if resp.status_code == 200:
             data = resp.json()
             return data["http_url_to_repo"], data["id"]
@@ -127,11 +167,25 @@ class GitMirrorPublisher:
     def _gitlab_protect_tag_patterns(
         self, client: httpx.Client, project_id: int, headers: dict
     ) -> None:
-        """Best-effort: protect baseline/* and novel-head/* on a mirror project.
+        """Apply the required policy or protect legacy release tags best-effort.
 
         Allows the user IDs supplied via tag_protection_user_ids.
-        Never raises — a failure must not block the ingestion push.
+        Legacy protection does not block the ingestion push.
         """
+        if self.policy_rules is not None:
+            report = reconcile_tag_policy(
+                client,
+                self.forge_url,
+                project_id,
+                headers,
+                self.policy_rules,
+                apply=True,
+            )
+            if not report["ready"]:
+                raise MirrorPolicyError(
+                    "Mirror policy protection failed: " + "; ".join(report["errors"])
+                )
+            return
         if not self.tag_protection_user_ids:
             return
 
@@ -175,10 +229,31 @@ class GitMirrorPublisher:
         self, client: httpx.Client, encoded_group: str, headers: dict
     ) -> int | None:
         """GET a GitLab group by encoded path. Returns the numeric group ID or None."""
+        options = {"follow_redirects": False} if self.policy_rules is not None else {}
         resp = client.get(
             f"{self.forge_url}/api/v4/groups/{encoded_group}",
             headers=headers,
+            **options,
         )
+        if self.policy_rules is not None:
+            if resp.status_code != 200:
+                raise MirrorPolicyError(
+                    f"GitLab group lookup failed: HTTP {resp.status_code}"
+                )
+            try:
+                data = resp.json()
+            except ValueError:
+                raise MirrorPolicyError("GitLab group identity is malformed") from None
+            if (
+                not isinstance(data, dict)
+                or data.get("full_path") != self.group
+                or type(data.get("id")) is not int
+                or data["id"] <= 0
+            ):
+                raise MirrorPolicyError(
+                    "GitLab group identity does not match mirror policy"
+                )
+            return data["id"]
         if resp.status_code == 200:
             return resp.json()["id"]
         return None
@@ -194,6 +269,7 @@ class GitMirrorPublisher:
         """Create a GitLab project. On 400 with path-taken, retries GET to handle
         race conditions where a concurrent job created the project between our
         initial GET and this POST. Returns (http_url_to_repo, project_id) or None."""
+        options = {"follow_redirects": False} if self.policy_rules is not None else {}
         resp = client.post(
             f"{self.forge_url}/api/v4/projects",
             headers=headers,
@@ -204,10 +280,22 @@ class GitMirrorPublisher:
                 "initialize_with_readme": False,
                 "visibility": "internal",
             },
+            **options,
         )
         if resp.status_code == 201:
             logger.info(f"Created new forge repository {self.group}/{repo_name}")
-            data = resp.json()
+            try:
+                data = resp.json()
+            except ValueError:
+                if self.policy_rules is not None:
+                    raise MirrorPolicyError(
+                        "GitLab project identity is malformed"
+                    ) from None
+                raise
+            if self.policy_rules is not None:
+                return _validated_project(
+                    data, self.forge_url, f"{self.group}/{repo_name}"
+                )
             return data["http_url_to_repo"], data["id"]
 
         already_exists = resp.status_code == 400 and (
@@ -226,11 +314,19 @@ class GitMirrorPublisher:
                 if result:
                     return result
                 time.sleep(attempt * 2)
+            if self.policy_rules is not None:
+                raise MirrorPolicyError(
+                    "Concurrent GitLab project creation could not be verified"
+                )
             logger.warning(
                 f"Project {self.group}/{repo_name} still not visible after retries; "
                 f"falling back to constructed URL"
             )
 
+        if self.policy_rules is not None:
+            raise MirrorPolicyError(
+                f"GitLab project creation failed: HTTP {resp.status_code}"
+            )
         logger.warning(
             f"Could not create forge project {self.group}/{repo_name}: "
             f"POST {resp.status_code}: {resp.text}"
@@ -238,8 +334,18 @@ class GitMirrorPublisher:
         return None
 
     def ensure_remote_project(self, repo_name: str) -> str:
-        """Ensure the project exists on the remote forge, creating it via API if
-        supported."""
+        """Ensure the project exists and enforce any required policy before use."""
+        if self.policy_rules is not None:
+            if not self.auth_token or not self.auth_token.strip():
+                raise MirrorPolicyError("Mirror policy requires GitLab authentication")
+            if self.explicit_remote_url is not None:
+                raise MirrorPolicyError(
+                    "Mirror policy does not allow an explicit remote URL"
+                )
+            if not re.fullmatch(r"pypi\.org-[a-z0-9][a-z0-9._-]*", repo_name):
+                raise MirrorPolicyError(
+                    "Mirror policy requires a Python mirror repository"
+                )
         if self.explicit_remote_url:
             return self.explicit_remote_url
 
@@ -279,9 +385,17 @@ class GitMirrorPublisher:
                         url, project_id = result
                         self._gitlab_protect_tag_patterns(client, project_id, headers)
                         return url
+        except MirrorPolicyError:
+            raise
         except Exception as e:
+            if self.policy_rules is not None:
+                raise MirrorPolicyError(
+                    "Could not verify GitLab project or mirror policy"
+                ) from None
             logger.warning(f"Could not verify or create forge project via API: {e}")
 
+        if self.policy_rules is not None:
+            raise MirrorPolicyError("Could not verify GitLab project or mirror policy")
         return f"{self.forge_url}/{self.group}/{repo_name}.git"
 
     def get_existing_tags(
