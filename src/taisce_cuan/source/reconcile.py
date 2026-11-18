@@ -13,11 +13,9 @@ from urllib.parse import quote
 
 import httpx
 
+from taisce_cuan.source.gitlab_api import MirrorPolicyError, gitlab_get, gitlab_list
 from taisce_cuan.source.mirror_policy import (
-    MirrorPolicyError,
     _validated_project,
-    gitlab_get,
-    gitlab_list,
     reconcile_tag_policy,
     required_tag_rules,
 )
