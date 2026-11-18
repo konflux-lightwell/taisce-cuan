@@ -334,7 +334,7 @@ def test_project_archive_exception_requires_bool(value):
 @pytest.mark.parametrize("delay,expected", [(None, 1), ("0", 1), ("2", 2), ("60", 60)])
 def test_policy_list_retries_rate_limited_get(monkeypatch, delay, expected):
     """Retry a 429 using a bounded delay while preserving the complete page."""
-    from taisce_cuan.source.mirror_policy import gitlab_list
+    from taisce_cuan.source.gitlab_api import gitlab_list
 
     # Arrange
     requests, sleeps = [], []
@@ -360,7 +360,7 @@ def test_policy_list_retries_rate_limited_get(monkeypatch, delay, expected):
 @pytest.mark.parametrize("delay", ["-1", "61", "bad", "1.5", ""])
 def test_policy_list_rejects_invalid_retry_after(monkeypatch, delay):
     """Stop immediately on invalid or unbounded rate-limit delays."""
-    from taisce_cuan.source.mirror_policy import MirrorPolicyError, gitlab_list
+    from taisce_cuan.source.gitlab_api import MirrorPolicyError, gitlab_list
 
     # Arrange
     requests, sleeps = [], []
@@ -380,7 +380,7 @@ def test_policy_list_rejects_invalid_retry_after(monkeypatch, delay):
 
 def test_policy_list_rate_limit_exhaustion_is_not_empty(monkeypatch):
     """Stop after three GET attempts without treating 429 as an empty page."""
-    from taisce_cuan.source.mirror_policy import MirrorPolicyError, gitlab_list
+    from taisce_cuan.source.gitlab_api import MirrorPolicyError, gitlab_list
 
     # Arrange
     requests, sleeps = [], []
@@ -402,7 +402,7 @@ def test_policy_list_rate_limit_exhaustion_is_not_empty(monkeypatch):
 def test_policy_list_rejects_invalid_pagination(header):
     """Reject loops, skipped pages, URLs, and invalid next-page numbers."""
     # Arrange
-    from taisce_cuan.source.mirror_policy import MirrorPolicyError, gitlab_list
+    from taisce_cuan.source.gitlab_api import MirrorPolicyError, gitlab_list
 
     transport = httpx.MockTransport(
         lambda request: httpx.Response(200, json=[], headers={"X-Next-Page": header})
@@ -417,7 +417,7 @@ def test_policy_list_rejects_invalid_pagination(header):
 def test_policy_list_rejects_malformed_payloads(payload):
     """Reject malformed pages instead of treating them as empty inventory."""
     # Arrange
-    from taisce_cuan.source.mirror_policy import MirrorPolicyError, gitlab_list
+    from taisce_cuan.source.gitlab_api import MirrorPolicyError, gitlab_list
 
     transport = httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
     with httpx.Client(transport=transport) as client:
@@ -429,7 +429,7 @@ def test_policy_list_rejects_malformed_payloads(payload):
 def test_policy_list_reads_full_page_without_pagination_header():
     """Continue after a full page when the server omits pagination headers."""
     # Arrange
-    from taisce_cuan.source.mirror_policy import gitlab_list
+    from taisce_cuan.source.gitlab_api import gitlab_list
 
     def respond(request):
         """Return a full first page and a final short page."""
@@ -447,7 +447,7 @@ def test_policy_list_reads_full_page_without_pagination_header():
 
 def test_policy_list_transport_error_does_not_expose_credentials():
     """Sanitize transport errors rather than exposing their credential text."""
-    from taisce_cuan.source.mirror_policy import MirrorPolicyError, gitlab_list
+    from taisce_cuan.source.gitlab_api import MirrorPolicyError, gitlab_list
 
     # Arrange
     def respond(request):
@@ -755,7 +755,7 @@ def test_policy_timeout_preserves_progress_without_exposing_credentials(mirror_s
 def test_policy_list_rejects_http_errors_and_invalid_json(response):
     """Do not confuse an API error or invalid JSON with an empty inventory."""
     # Arrange
-    from taisce_cuan.source.mirror_policy import MirrorPolicyError, gitlab_list
+    from taisce_cuan.source.gitlab_api import MirrorPolicyError, gitlab_list
 
     with httpx.Client(
         transport=httpx.MockTransport(lambda request: response)
@@ -768,7 +768,7 @@ def test_policy_list_rejects_http_errors_and_invalid_json(response):
 def test_policy_list_rejects_redirect_without_forwarding_token():
     """Keep private-token headers off cross-host pagination or redirects."""
     # Arrange
-    from taisce_cuan.source.mirror_policy import MirrorPolicyError, gitlab_list
+    from taisce_cuan.source.gitlab_api import MirrorPolicyError, gitlab_list
 
     requests = []
 
@@ -789,7 +789,7 @@ def test_policy_list_rejects_redirect_without_forwarding_token():
 def test_policy_list_rejects_page_limit():
     """Report an incomplete listing instead of stopping after the page bound."""
     # Arrange
-    from taisce_cuan.source.mirror_policy import MirrorPolicyError, gitlab_list
+    from taisce_cuan.source.gitlab_api import MirrorPolicyError, gitlab_list
 
     def respond(request):
         """Supply a next-page header on every page."""
@@ -897,7 +897,7 @@ def test_policy_publish_dry_run_stays_offline(
 
 def test_policy_rejects_partial_inventory():
     """Reject a partial HTTP response rather than treating it as full coverage."""
-    from taisce_cuan.source.mirror_policy import MirrorPolicyError, gitlab_list
+    from taisce_cuan.source.gitlab_api import MirrorPolicyError, gitlab_list
 
     # Arrange
     with httpx.Client(
