@@ -9,7 +9,7 @@ import httpx
 
 from taisce_cuan.source.gitlab_api import MirrorPolicyError, gitlab_list
 
-_PROFILE = "python-mirror"
+MIRROR_POLICIES = ("python-mirror",)
 _ROLE_LEVELS = {0, 5, 10, 15, 20, 30, 40, 50, 60}
 
 
@@ -77,7 +77,7 @@ def required_tag_rules(
     Raises:
         MirrorPolicyError: The profile, target, release users, or bot are invalid.
     """
-    if profile != _PROFILE:
+    if profile not in MIRROR_POLICIES:
         raise MirrorPolicyError("Unsupported mirror policy profile")
     if not _canonical_target(forge_url, group):
         raise MirrorPolicyError("Mirror policy requires a canonical forge and group")

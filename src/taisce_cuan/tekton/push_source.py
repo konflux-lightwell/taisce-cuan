@@ -29,6 +29,7 @@ from pathlib import Path
 from taisce_cuan.provenance.attest import PublishGitSourceRequest
 from taisce_cuan.sdist import canonicalize_name, inspect_sdist_metadata
 from taisce_cuan.source import GitMirrorPublisher
+from taisce_cuan.source.mirror_policy import MIRROR_POLICIES
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -335,7 +336,7 @@ def create_parser() -> argparse.ArgumentParser:
         dest="tag_protection_user_ids",
         help="Comma-separated list of GitLab user IDs allowed to create protected tags",
     )
-    parser.add_argument("--mirror-policy", choices=["python-mirror"], default=None)
+    parser.add_argument("--mirror-policy", choices=MIRROR_POLICIES, default=None)
     parser.add_argument(
         "--tag-protection-bot-user-id",
         type=int,

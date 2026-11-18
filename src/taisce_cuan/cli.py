@@ -25,6 +25,7 @@ from pathlib import Path
 from taisce_cuan.provenance.attest import PublishGitSourceRequest
 from taisce_cuan.sdist import inspect_sdist_metadata
 from taisce_cuan.source import GitMirrorPublisher, SdistSourceFetcher
+from taisce_cuan.source.mirror_policy import MIRROR_POLICIES
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("taisce-cuan")
@@ -152,7 +153,7 @@ def create_parser() -> argparse.ArgumentParser:
             "(e.g. '11111,22222')"
         ),
     )
-    push_parser.add_argument("--mirror-policy", choices=["python-mirror"], default=None)
+    push_parser.add_argument("--mirror-policy", choices=MIRROR_POLICIES, default=None)
     push_parser.add_argument(
         "--tag-protection-bot-user-id",
         type=int,
@@ -227,7 +228,7 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     push_git_source_parser.add_argument(
-        "--mirror-policy", choices=["python-mirror"], default=None
+        "--mirror-policy", choices=MIRROR_POLICIES, default=None
     )
     push_git_source_parser.add_argument(
         "--tag-protection-bot-user-id",
@@ -244,7 +245,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
     reconcile_parser.add_argument("--group", required=True)
     reconcile_parser.add_argument(
-        "--mirror-policy", required=True, choices=["python-mirror"]
+        "--mirror-policy", required=True, choices=MIRROR_POLICIES
     )
     reconcile_parser.add_argument("--tag-protection-user-ids", required=True)
     reconcile_parser.add_argument(

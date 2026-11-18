@@ -15,6 +15,7 @@ import httpx
 
 from taisce_cuan.source.gitlab_api import MirrorPolicyError, gitlab_get, gitlab_list
 from taisce_cuan.source.mirror_policy import (
+    MIRROR_POLICIES,
     _validated_project,
     reconcile_tag_policy,
     required_tag_rules,
@@ -246,7 +247,7 @@ def reconcile_mirrors(
     report = {
         "intent": "apply" if apply else "inspect",
         "started_at_utc": datetime.now(UTC).isoformat(),
-        "mirror_policy": mirror_policy if mirror_policy == "python-mirror" else None,
+        "mirror_policy": mirror_policy if mirror_policy in MIRROR_POLICIES else None,
         "max_projects": max_projects if type(max_projects) is int else None,
         "after_project_id": after_project_id if type(after_project_id) is int else None,
         "total_inventory": None,
