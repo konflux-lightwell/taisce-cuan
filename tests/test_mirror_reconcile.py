@@ -2,7 +2,6 @@
 
 import json
 import os
-import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -123,7 +122,7 @@ class GitLab:
 
 
 @pytest.fixture
-def gitlab(monkeypatch, tmp_path):
+def gitlab(monkeypatch, tmp_path, fake_clock):
     """Route the actual HTTP client to the fake server."""
     server = GitLab(report_path=tmp_path / "audit.json")
     client = httpx.Client
@@ -134,7 +133,6 @@ def gitlab(monkeypatch, tmp_path):
         return client(*args, **kwargs)
 
     monkeypatch.setattr(httpx, "Client", factory)
-    monkeypatch.setattr(time, "sleep", lambda _: None)
     return server
 
 
@@ -371,6 +369,7 @@ def test_report_records_validated_target_and_utc_start(gitlab):
     # Assert
     report = audit(gitlab)
     assert result == 0 and report["forge_url"] == FORGE and report["group"] == GROUP
+    assert report["max_requests_per_minute"] == 300
     assert datetime.fromisoformat(report["started_at_utc"]).utcoffset() == timedelta(0)
 
 
@@ -483,6 +482,44 @@ def test_project_api_failure_stops_remaining_batch(gitlab):
     assert report["inventory_complete"] and not report["fleet_ready"]
     assert not any("/projects/2/protected_tags" in r.url.path for r in gitlab.requests)
     assert TOKEN not in json.dumps(report)
+
+
+@pytest.mark.parametrize(
+    "options,interval",
+    [
+        ({"max_requests_per_minute": 450}, 60 / 450),
+        ({"max_requests_per_minute": 1}, 60.0),
+        ({}, 0.2),
+    ],
+)
+def test_apply_batch_paces_every_gitlab_request(gitlab, fake_clock, options, interval):
+    """Every GitLab request in an apply batch after the first waits one interval."""
+    # Arrange
+    gitlab.pages = [
+        [
+            project(1, "pypi.org-one"),
+            project(2, "pypi.org-two"),
+            project(3, "pypi.org-3"),
+        ]
+    ]
+    # Act
+    run(gitlab, apply=True, max_projects=3, **options)
+    # Assert
+    assert any(r.method == "POST" for r in gitlab.requests)
+    assert len(gitlab.requests) > 1
+    assert fake_clock.now == pytest.approx((len(gitlab.requests) - 1) * interval)
+
+
+@pytest.mark.parametrize("rate", [0, 451, True])
+def test_invalid_request_rate_rejected_before_http(gitlab, rate):
+    """Reject unsafe or non-integer request rates before any GitLab request."""
+    # Act
+    result = run(gitlab, max_requests_per_minute=rate)
+    # Assert
+    report = audit(gitlab)
+    assert result == 1 and not gitlab.requests
+    assert report["errors"] == ["Request rate must be between 1 and 450"]
+    assert not report["fleet_ready"]
 
 
 @pytest.mark.parametrize("limit", [None, 0, -1, 26, True])

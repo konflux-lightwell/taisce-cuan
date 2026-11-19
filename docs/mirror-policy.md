@@ -59,9 +59,10 @@ put a credential in a report. Each run requires a **new** report path;
 an existing file is never overwritten. The initial report and each project's
 before snapshot are saved before any changes. Each update replaces the report
 atomically, so a failed update leaves the previous snapshot available. Reports
-contain the validated target, UTC start time, project outcomes, created rules,
-errors, and remaining IDs. If a snapshot update fails after a remote change,
-the previous report may not include that change. Inspect live state before retrying.
+contain the validated target, UTC start time, request rate, project outcomes,
+created rules, errors, and remaining IDs. If a snapshot update fails after a
+remote change, the previous report may not include that change. Inspect live
+state before retrying.
 
 Inspect the full active scope without making changes:
 
@@ -85,27 +86,40 @@ taisce-cuan reconcile-mirrors \
   --tag-protection-user-ids "$RELEASE_IDS" \
   --tag-protection-bot-user-id "$BOT_ID" \
   --report ./mirror-batch-1.json \
-  --apply --max-projects 25
+  --apply --max-projects 25 \
+  --max-requests-per-minute 200
 ```
 
 The limit is required with `--apply` and must be between 1 and 25. It can also
 bound a read-only inspection. A project with the two release rules already in
 place can require 15 API requests to create the six remaining rules. A mirror
 missing all eight rules can require 19, so a batch of 25 can reach 475 requests
-plus the inventory pages. That is close to the 500-request-per-minute account
-quota, so operators should account for other activity and consider a smaller
-batch. The publisher applies the same rules for one project per publish and does
-not use this limit. GET requests retry a rate limit at most
-twice, using a bounded delay. POST requests are deliberately not retried, even
-after a rate limit. Earlier creates in the batch may already have succeeded, and
-a transport failure can leave a write's outcome unknown. The run attempts a
-policy readback and records the error instead of replaying the write. Each run
-lists the entire inventory before changing any project. Direct active Python
-mirrors are processed in numeric ID order; Java, shared, and subgroup projects are excluded,
-and archived mirrors are recorded separately and never changed. A direct
-`pypi.org-*` project with an unexpected path, such as uppercase letters,
-is recorded as `unreviewed-python-path`. It is not changed and it
-prevents a fleet-ready claim until someone reviews it.
+plus the inventory pages.
+
+The run paces every GitLab request to `--max-requests-per-minute`. This value
+defaults to 300 and must be between 1 and 450. Pacing covers inventory pages, GET
+retries, identity checks, creates, and readbacks. Request starts are spaced at
+least 60 divided by that value seconds apart, so a batch of 25 no longer bursts
+over the limit of 500 requests per minute that the GitLab instance allows per
+token. Leave headroom for other users of the same token, and lower the value if
+other jobs run at the same time. A larger audit takes longer in proportion:
+minutes equal total requests divided by the rate. For example, 3,000 requests
+take about 10 minutes at the default rate. A read-only audit of thousands of
+mirrors sends at least one request per mirror, so it takes several minutes at
+the default rate.
+
+The publisher applies the same rules for one project per publish and does not
+use this limit. GET requests retry a rate limit at most twice, using a bounded
+delay. POST requests are deliberately not retried, even after a rate limit.
+Earlier creates in the batch may already have succeeded, and a transport failure
+can leave a write's outcome unknown. The run attempts a policy readback and
+records the error instead of replaying the write. Each run lists the entire
+inventory before changing any project. Direct active Python mirrors are processed
+in numeric ID order; Java, shared, and subgroup projects are excluded, and
+archived mirrors are recorded separately and never changed. A direct
+`pypi.org-*` project with an unexpected path, such as uppercase letters, is
+recorded as `unreviewed-python-path`. It is not changed and it prevents a
+fleet-ready claim until someone reviews it.
 
 Before each apply, the project is read again by ID and its current identity and
 archive state are saved in the report. This check is not atomic with the later
