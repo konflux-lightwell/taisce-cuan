@@ -485,6 +485,53 @@ def test_project_api_failure_stops_remaining_batch(gitlab):
     assert TOKEN not in json.dumps(report)
 
 
+@pytest.mark.parametrize(
+    "options,interval",
+    [
+        pytest.param(
+            {"max_requests_per_minute": 60},
+            1.0,
+            marks=pytest.mark.xfail(strict=True, raises=TypeError),
+        ),
+        pytest.param(
+            {},
+            0.2,
+            marks=pytest.mark.xfail(strict=True, raises=AssertionError),
+        ),
+    ],
+)
+def test_read_only_audit_is_paced_by_request_rate(
+    gitlab, fake_clock, options, interval
+):
+    """Every GitLab request after the first waits one interval of the rate."""
+    # Arrange
+    gitlab.pages = [
+        [
+            project(1, "pypi.org-one"),
+            project(2, "pypi.org-two"),
+            project(3, "pypi.org-3"),
+        ]
+    ]
+    # Act
+    run(gitlab, **options)
+    # Assert
+    assert len(gitlab.requests) > 1
+    assert fake_clock.now == pytest.approx((len(gitlab.requests) - 1) * interval)
+
+
+@pytest.mark.xfail(strict=True, raises=TypeError)
+@pytest.mark.parametrize("rate", [0, 451, True, "60"])
+def test_invalid_request_rate_rejected_before_http(gitlab, rate):
+    """Reject unsafe or non-integer request rates before any GitLab request."""
+    # Act
+    result = run(gitlab, max_requests_per_minute=rate)
+    # Assert
+    report = audit(gitlab)
+    assert result == 1 and not gitlab.requests
+    assert report["errors"] == ["Request rate must be between 1 and 450"]
+    assert not report["fleet_ready"]
+
+
 @pytest.mark.parametrize("limit", [None, 0, -1, 26, True])
 def test_apply_requires_valid_bounded_batch_before_http(gitlab, limit):
     """Reject absent, nonpositive, non-integer, or excessive apply limits."""

@@ -420,3 +420,64 @@ def test_reconcile_cli_reads_environment_token_and_writes_report(tmp_path, monke
     assert requests[0].headers["PRIVATE-TOKEN"] == "credential"
     assert "credential" not in report.read_text()
     assert requests[0].url.params["include_subgroups"] == "false"
+
+
+@pytest.mark.parametrize(
+    "extra_args,interval",
+    [
+        pytest.param(
+            ["--max-requests-per-minute", "60"],
+            1.0,
+            marks=pytest.mark.xfail(strict=True, raises=SystemExit),
+        ),
+        pytest.param(
+            [],
+            0.2,
+            marks=pytest.mark.xfail(strict=True, raises=AssertionError),
+        ),
+    ],
+)
+def test_reconcile_cli_paces_requests_with_flag_or_default(
+    tmp_path, monkeypatch, fake_clock, extra_args, interval
+):
+    """Pace the audit at the CLI rate, or 300 requests per minute by default."""
+    # Arrange
+    requests = []
+    monkeypatch.setenv("GITLAB_TOKEN", "credential")
+    client = httpx.Client
+
+    def respond(request):
+        """Serve three empty inventory pages so the audit makes several requests."""
+        requests.append(request)
+        page = int(request.url.params["page"])
+        next_page = str(page + 1) if page < 3 else ""
+        return httpx.Response(200, json=[], headers={"X-Next-Page": next_page})
+
+    def factory(*args, **kwargs):
+        """Send real client requests to the offline fake."""
+        kwargs["transport"] = httpx.MockTransport(respond)
+        return client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "Client", factory)
+    # Act
+    result = cli.main(
+        [
+            "reconcile-mirrors",
+            "--forge-url",
+            FORGE,
+            "--group",
+            GROUP,
+            "--mirror-policy",
+            "python-mirror",
+            "--tag-protection-user-ids",
+            CREATOR_IDS,
+            "--tag-protection-bot-user-id",
+            str(BOT_ID),
+            "--report",
+            str(tmp_path / "report.json"),
+            *extra_args,
+        ]
+    )
+    # Assert
+    assert result == 1 and len(requests) > 1
+    assert fake_clock.now == pytest.approx((len(requests) - 1) * interval)
