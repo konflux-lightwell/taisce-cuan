@@ -20,9 +20,12 @@ from taisce_cuan.source.mirror_policy import (
     reconcile_tag_policy,
     required_tag_rules,
 )
+from taisce_cuan.source.pacing import RequestPacer
 
 logger = logging.getLogger(__name__)
 _MAX_PROJECTS = 25
+# 🛡️ Stay below GitLab's 500 requests per minute per token, which is shared.
+_MAX_REQUESTS_PER_MINUTE = 450
 _PYTHON_NAME = re.compile(r"pypi\.org-[a-z0-9][a-z0-9._-]*")
 # Exclusion reason for a direct pypi.org-* project whose path needs human review.
 _UNREVIEWED_PATH = "unreviewed-python-path"
@@ -99,8 +102,9 @@ def _valid_options(
     apply: bool,
     max_projects: int | None,
     after_project_id: int | None,
+    max_requests_per_minute: int,
 ) -> None:
-    """Reject missing authentication and unsafe batch bounds before HTTP requests."""
+    """Reject missing authentication and unsafe batch or rate bounds before HTTP."""
     if not isinstance(auth_token, str) or not auth_token.strip():
         raise MirrorPolicyError("Mirror reconciliation requires GitLab authentication")
     if apply and max_projects is None:
@@ -113,6 +117,10 @@ def _valid_options(
         type(after_project_id) is not int or after_project_id < 0
     ):
         raise MirrorPolicyError("Project cursor must be a nonnegative integer")
+    if type(max_requests_per_minute) is not int or not (
+        1 <= max_requests_per_minute <= _MAX_REQUESTS_PER_MINUTE
+    ):
+        raise MirrorPolicyError("Request rate must be between 1 and 450")
 
 
 def _inspect_projects(
@@ -226,6 +234,7 @@ def reconcile_mirrors(
     apply: bool = False,
     max_projects: int | None = None,
     after_project_id: int | None = None,
+    max_requests_per_minute: int = 300,
 ) -> int:
     """Reconcile a fresh, complete inventory and write an exclusive JSON audit.
 
@@ -240,6 +249,7 @@ def reconcile_mirrors(
         apply: Create missing rules after the inventory and snapshot are saved.
         max_projects: Optional batch limit, required for apply and capped at 25.
         after_project_id: Optional numeric cursor excluding the prefix.
+        max_requests_per_minute: GitLab request starts allowed per minute, 1 to 450.
 
     Returns:
         Zero only for a complete, ready audit with no archived mirrors.
@@ -270,13 +280,19 @@ def reconcile_mirrors(
         return 1
     try:
         _save_report(report_path, report)
-        _valid_options(auth_token, apply, max_projects, after_project_id)
+        _valid_options(
+            auth_token, apply, max_projects, after_project_id, max_requests_per_minute
+        )
         rules = required_tag_rules(
             mirror_policy, forge_url, group, release_user_ids, bot_user_id
         )
         report.update(forge_url=forge_url, group=group)
         headers = {"PRIVATE-TOKEN": auth_token}
-        with httpx.Client(timeout=15.0, verify=True) as client:
+        # Every GitLab request, including retries and writes, shares one schedule.
+        pacer = RequestPacer(max_requests_per_minute)
+        with httpx.Client(
+            timeout=15.0, verify=True, event_hooks={"request": [pacer]}
+        ) as client:
             rows = gitlab_list(
                 client,
                 f"{forge_url}/api/v4/groups/{quote(group, safe='')}/projects",

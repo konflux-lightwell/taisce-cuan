@@ -259,6 +259,13 @@ def create_parser() -> argparse.ArgumentParser:
     reconcile_parser.add_argument("--apply", action="store_true")
     reconcile_parser.add_argument("--max-projects", type=int, default=None)
     reconcile_parser.add_argument("--after-project-id", type=int, default=None)
+    reconcile_parser.add_argument(
+        "--max-requests-per-minute",
+        type=int,
+        default=300,
+        help="Requests per minute cap for GitLab API calls, 1 to 450. "
+        "Leave headroom because the quota is shared per token.",
+    )
 
     return parser
 
@@ -439,6 +446,7 @@ def main(argv: list[str] | None = None) -> int:
             apply=args.apply,
             max_projects=args.max_projects,
             after_project_id=args.after_project_id,
+            max_requests_per_minute=args.max_requests_per_minute,
         )
     return 0
 

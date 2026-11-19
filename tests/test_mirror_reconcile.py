@@ -488,16 +488,8 @@ def test_project_api_failure_stops_remaining_batch(gitlab):
 @pytest.mark.parametrize(
     "options,interval",
     [
-        pytest.param(
-            {"max_requests_per_minute": 60},
-            1.0,
-            marks=pytest.mark.xfail(strict=True, raises=TypeError),
-        ),
-        pytest.param(
-            {},
-            0.2,
-            marks=pytest.mark.xfail(strict=True, raises=AssertionError),
-        ),
+        ({"max_requests_per_minute": 60}, 1.0),
+        ({}, 0.2),
     ],
 )
 def test_read_only_audit_is_paced_by_request_rate(
@@ -519,7 +511,6 @@ def test_read_only_audit_is_paced_by_request_rate(
     assert fake_clock.now == pytest.approx((len(gitlab.requests) - 1) * interval)
 
 
-@pytest.mark.xfail(strict=True, raises=TypeError)
 @pytest.mark.parametrize("rate", [0, 451, True, "60"])
 def test_invalid_request_rate_rejected_before_http(gitlab, rate):
     """Reject unsafe or non-integer request rates before any GitLab request."""
