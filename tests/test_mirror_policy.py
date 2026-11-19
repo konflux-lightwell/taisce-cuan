@@ -1131,7 +1131,7 @@ def policy_publisher():
 
 
 def expect_error(action, error_type):
-    """Return the expected error, or fail with AssertionError for a precise xfail."""
+    """Return the expected error, or fail with a plain AssertionError if none occurs."""
     try:
         action()
     except error_type as error:
@@ -1148,9 +1148,6 @@ def publish_outcome(publisher, name):
     return None
 
 
-@pytest.mark.xfail(
-    strict=True, raises=AssertionError, reason="branch rule is not provisioned yet"
-)
 @pytest.mark.parametrize("exists", [False, True], ids=["new", "existing"])
 def test_branch_rule_is_created_with_readback(mirror_server, exists):
     """Create a missing verification-metadata rule once and accept its readback."""
@@ -1176,9 +1173,6 @@ def test_branch_rule_is_created_with_readback(mirror_server, exists):
     assert mirror_server.branch_rules[BRANCH] == branch_rule()
 
 
-@pytest.mark.xfail(
-    strict=True, raises=AssertionError, reason="branch rule is not checked yet"
-)
 def test_correct_branch_rule_causes_no_branch_write(mirror_server):
     """Read the correct branch rule and leave it untouched."""
     # Arrange
@@ -1193,9 +1187,6 @@ def test_correct_branch_rule_causes_no_branch_write(mirror_server):
     assert mirror_server.branch_rules == {BRANCH: branch_rule()}
 
 
-@pytest.mark.xfail(
-    strict=True, raises=AssertionError, reason="branch rule is not checked yet"
-)
 @pytest.mark.parametrize("rule", CONFLICTING_BRANCH_RULES)
 def test_branch_rule_conflicts_are_reported_not_rewritten(mirror_server, rule):
     """Refuse divergent branch protection and leave the stored rule unchanged."""
@@ -1214,11 +1205,6 @@ def test_branch_rule_conflicts_are_reported_not_rewritten(mirror_server, rule):
     assert mirror_server.branch_rules[BRANCH] == rule
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="overlapping branch rules are not checked",
-)
 @pytest.mark.parametrize(
     ("rule", "blocked"),
     [
@@ -1254,9 +1240,6 @@ def test_overlapping_branch_rules(mirror_server, rule, blocked):
         assert outcome is None
 
 
-@pytest.mark.xfail(
-    strict=True, raises=ImportError, reason="branch policy module is missing"
-)
 @pytest.mark.parametrize(
     ("setting", "error", "created"),
     [
@@ -1305,9 +1288,6 @@ def test_branch_apply_failures_are_not_ready(mirror_server, setting, error, crea
     assert len(branch_requests(mirror_server, "POST")) == 1
 
 
-@pytest.mark.xfail(
-    strict=True, raises=ImportError, reason="project policy module is missing"
-)
 def test_tag_conflict_does_not_block_branch_rule(mirror_server):
     """Create the branch rule while a stale tag conflict blocks tag writes."""
     from taisce_cuan.source.project_policy import (
@@ -1335,9 +1315,6 @@ def test_tag_conflict_does_not_block_branch_rule(mirror_server):
     assert any("pnc/*" in error for error in report["errors"])
 
 
-@pytest.mark.xfail(
-    strict=True, raises=ImportError, reason="project policy module is missing"
-)
 def test_branch_conflict_does_not_block_tag_rules(mirror_server):
     """Create missing tag rules while a conflicting branch rule stays untouched."""
     from taisce_cuan.source.project_policy import (
@@ -1369,9 +1346,6 @@ def test_branch_conflict_does_not_block_tag_rules(mirror_server):
     assert not report["apply_incomplete"]
 
 
-@pytest.mark.xfail(
-    strict=True, raises=ImportError, reason="project policy module is missing"
-)
 def test_branch_list_failure_after_tag_writes_keeps_created_audit(mirror_server):
     """Keep the audit of tag rules created before a branch inventory failure."""
     from taisce_cuan.source.project_policy import (
@@ -1397,9 +1371,6 @@ def test_branch_list_failure_after_tag_writes_keeps_created_audit(mirror_server)
     assert not report["ready"] and report["apply_incomplete"]
 
 
-@pytest.mark.xfail(
-    strict=True, raises=ImportError, reason="project policy module is missing"
-)
 def test_branch_list_failure_before_any_write_raises(mirror_server):
     """Raise without writing when the branch inventory fails before any tag write."""
     from taisce_cuan.source.project_policy import (

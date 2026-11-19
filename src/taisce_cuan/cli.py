@@ -158,7 +158,11 @@ def create_parser() -> argparse.ArgumentParser:
         "--tag-protection-bot-user-id",
         type=int,
         default=os.getenv("TAG_PROTECTION_BOT_USER_ID"),
-        help="GitLab user ID of the pipeline bot, required with --mirror-policy",
+        help=(
+            "GitLab user ID of the pipeline bot. The bot creates the pin tags and is "
+            "the only user allowed to push to the verification-metadata branch. "
+            "Required with --mirror-policy"
+        ),
     )
     push_parser.add_argument(
         "--dry-run", action="store_true", help="Do not push to remote"
@@ -234,7 +238,11 @@ def create_parser() -> argparse.ArgumentParser:
         "--tag-protection-bot-user-id",
         type=int,
         default=os.getenv("TAG_PROTECTION_BOT_USER_ID"),
-        help="GitLab user ID of the pipeline bot, required with --mirror-policy",
+        help=(
+            "GitLab user ID of the pipeline bot. The bot creates the pin tags and is "
+            "the only user allowed to push to the verification-metadata branch. "
+            "Required with --mirror-policy"
+        ),
     )
     push_git_source_parser.add_argument(
         "--dry-run", action="store_true", help="Do not push to remote"
@@ -249,7 +257,13 @@ def create_parser() -> argparse.ArgumentParser:
     )
     reconcile_parser.add_argument("--tag-protection-user-ids", required=True)
     reconcile_parser.add_argument(
-        "--tag-protection-bot-user-id", required=True, type=int
+        "--tag-protection-bot-user-id",
+        required=True,
+        type=int,
+        help=(
+            "GitLab user ID of the pipeline bot. The bot creates the pin tags and is "
+            "the only user allowed to push to the verification-metadata branch"
+        ),
     )
     reconcile_parser.add_argument("--report", required=True, type=Path)
     reconcile_parser.add_argument("--forge-url", required=True)

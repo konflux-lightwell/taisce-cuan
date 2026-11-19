@@ -341,7 +341,11 @@ def create_parser() -> argparse.ArgumentParser:
         "--tag-protection-bot-user-id",
         type=int,
         default=None,
-        help="GitLab user ID of the pipeline bot, required with --mirror-policy",
+        help=(
+            "GitLab user ID of the pipeline bot. The bot creates the pin tags and is "
+            "the only user allowed to push to the verification-metadata branch. "
+            "Required with --mirror-policy"
+        ),
     )
     parser.add_argument("--dry-run", action="store_true")
     return parser

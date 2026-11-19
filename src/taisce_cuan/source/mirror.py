@@ -59,8 +59,10 @@ from taisce_cuan.source.git_source import (
 from taisce_cuan.source.mirror_policy import (
     MirrorPolicyError,
     _validated_project,
-    reconcile_tag_policy,
-    required_tag_rules,
+)
+from taisce_cuan.source.project_policy import (
+    reconcile_project_policy,
+    required_project_policy,
 )
 
 logger = logging.getLogger(__name__)
@@ -112,9 +114,9 @@ class GitMirrorPublisher:
         mirror_policy: str | None = None,
         tag_protection_bot_user_id: int | None = None,
     ):
-        """Configure the publisher and resolve any explicit tag policy."""
+        """Configure the publisher and resolve any explicit tag and branch policy."""
         self.policy_rules = (
-            required_tag_rules(
+            required_project_policy(
                 mirror_policy,
                 forge_url,
                 group,
@@ -167,13 +169,14 @@ class GitMirrorPublisher:
     def _gitlab_protect_tag_patterns(
         self, client: httpx.Client, project_id: int, headers: dict
     ) -> None:
-        """Apply the required policy or protect legacy release tags best-effort.
+        """Apply the required tag and branch policy, or protect legacy release tags.
 
-        Allows the user IDs supplied via tag_protection_user_ids.
+        The policy covers the protected tag rules and the verification-metadata
+        branch rule. Allows the user IDs supplied via tag_protection_user_ids.
         Legacy protection does not block the ingestion push.
         """
         if self.policy_rules is not None:
-            report = reconcile_tag_policy(
+            report = reconcile_project_policy(
                 client,
                 self.forge_url,
                 project_id,

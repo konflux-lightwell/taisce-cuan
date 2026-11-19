@@ -14,13 +14,13 @@ from urllib.parse import quote
 import httpx
 
 from taisce_cuan.source.gitlab_api import MirrorPolicyError, gitlab_get, gitlab_list
-from taisce_cuan.source.mirror_policy import (
-    MIRROR_POLICIES,
-    _validated_project,
-    reconcile_tag_policy,
-    required_tag_rules,
-)
+from taisce_cuan.source.mirror_policy import MIRROR_POLICIES, _validated_project
 from taisce_cuan.source.pacing import RequestPacer
+from taisce_cuan.source.project_policy import (
+    ProjectPolicy,
+    reconcile_project_policy,
+    required_project_policy,
+)
 
 logger = logging.getLogger(__name__)
 _MAX_PROJECTS = 25
@@ -130,7 +130,7 @@ def _inspect_projects(
     active: list[dict],
     forge_url: str,
     headers: dict,
-    rules: tuple,
+    policy: ProjectPolicy,
     apply: bool,
     max_projects: int | None,
     after_project_id: int | None,
@@ -154,8 +154,8 @@ def _inspect_projects(
         report["projects"].append(outcome)
         _save_report(report_path, report)
         try:
-            outcome["before"] = reconcile_tag_policy(
-                client, forge_url, project_id, headers, rules
+            outcome["before"] = reconcile_project_policy(
+                client, forge_url, project_id, headers, policy
             )
             # Persist the before snapshot and intent before any POST.
             _save_report(report_path, report)
@@ -181,14 +181,11 @@ def _inspect_projects(
                     "archived": False,
                 }
                 _save_report(report_path, report)
-                outcome["after"] = reconcile_tag_policy(
-                    client, forge_url, project_id, headers, rules, apply=True
+                outcome["after"] = reconcile_project_policy(
+                    client, forge_url, project_id, headers, policy, apply=True
                 )
                 _save_report(report_path, report)
-                if (
-                    not outcome["after"]["ready"]
-                    and outcome["after"]["writes_attempted"]
-                ):
+                if outcome["after"]["apply_incomplete"]:
                     # A write may be partial, so stop and keep the rest untouched.
                     report["errors"].append("Project policy apply did not complete")
                     break
@@ -243,7 +240,8 @@ def reconcile_mirrors(
         group: Canonical GitLab namespace holding the direct mirrors.
         auth_token: GitLab API credential, never written to the report.
         release_user_ids: Expected release tag creator IDs.
-        bot_user_id: Expected pipeline bot ID for the pin tag rules.
+        bot_user_id: Expected pipeline bot ID for the pin tag rules and the
+            verification-metadata branch rule.
         report_path: New path for the audit report; existing files are refused.
         mirror_policy: Explicit policy profile.
         apply: Create missing rules after the inventory and snapshot are saved.
@@ -286,7 +284,7 @@ def reconcile_mirrors(
         _valid_options(
             auth_token, apply, max_projects, after_project_id, max_requests_per_minute
         )
-        rules = required_tag_rules(
+        policy = required_project_policy(
             mirror_policy, forge_url, group, release_user_ids, bot_user_id
         )
         report.update(forge_url=forge_url, group=group)
@@ -324,7 +322,7 @@ def reconcile_mirrors(
                 active,
                 forge_url,
                 headers,
-                rules,
+                policy,
                 apply,
                 max_projects,
                 after_project_id,

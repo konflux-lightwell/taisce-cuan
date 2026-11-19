@@ -747,9 +747,6 @@ def test_inspect_records_failed_project_and_audits_the_rest(gitlab):
     assert TOKEN not in json.dumps(report)
 
 
-@pytest.mark.xfail(
-    strict=True, raises=AssertionError, reason="branch rule is not provisioned yet"
-)
 def test_stale_tag_conflict_plus_branch_create_does_not_stop_batch(gitlab):
     """A stale tag conflict must not stop the batch after a branch rule is created."""
     # Arrange
@@ -770,9 +767,6 @@ def test_stale_tag_conflict_plus_branch_create_does_not_stop_batch(gitlab):
     assert report["projects"][1]["after"]["ready"]
 
 
-@pytest.mark.xfail(
-    strict=True, raises=AssertionError, reason="branch rule is not reported yet"
-)
 def test_report_records_branch_rules_and_fleet_readiness(gitlab, tmp_path):
     """Audit a missing branch rule, apply it, then prove a fully ready fleet."""
     # Arrange
