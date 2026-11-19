@@ -425,16 +425,8 @@ def test_reconcile_cli_reads_environment_token_and_writes_report(tmp_path, monke
 @pytest.mark.parametrize(
     "extra_args,interval",
     [
-        pytest.param(
-            ["--max-requests-per-minute", "60"],
-            1.0,
-            marks=pytest.mark.xfail(strict=True, raises=SystemExit),
-        ),
-        pytest.param(
-            [],
-            0.2,
-            marks=pytest.mark.xfail(strict=True, raises=AssertionError),
-        ),
+        (["--max-requests-per-minute", "60"], 1.0),
+        ([], 0.2),
     ],
 )
 def test_reconcile_cli_paces_requests_with_flag_or_default(

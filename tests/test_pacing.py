@@ -4,7 +4,6 @@ import httpx
 import pytest
 
 
-@pytest.mark.xfail(strict=True, raises=ImportError)
 @pytest.mark.parametrize("rate", [60, 120])
 def test_pacer_sleeps_only_until_the_next_request_slot(fake_clock, rate):
     """Space back-to-back starts by one interval and never wait after a gap."""
