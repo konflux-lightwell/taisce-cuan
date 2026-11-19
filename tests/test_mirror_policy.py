@@ -293,6 +293,7 @@ def test_required_policy_rejects_extra_creator_permissions(mirror_server, patter
         {"remote_url": "https://gitlab.example.com/another/project.git"},
         {"tag_protection_user_ids": []},
         {"tag_protection_user_ids": None},
+        {"forge_url": "https://git.example.com"},
     ],
 )
 def test_required_policy_cannot_fall_back_to_an_unchecked_target(

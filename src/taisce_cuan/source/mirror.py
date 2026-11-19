@@ -359,6 +359,9 @@ class GitMirrorPublisher:
             return f"{self.forge_url}/{self.group}/{repo_name}.git"
 
         if "gitlab" not in self.forge_url.lower():
+            # 🔒 Policy checks use the GitLab API, so a policy cannot skip them here.
+            if self.policy_rules is not None:
+                raise MirrorPolicyError("Mirror policy requires a GitLab forge")
             logger.warning(
                 f"Forge '{self.forge_url}' is not GitLab. Automatic repo creation "
                 f"via API is not supported. "
