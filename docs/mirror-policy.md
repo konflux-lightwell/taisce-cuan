@@ -85,17 +85,29 @@ taisce-cuan reconcile-mirrors \
   --tag-protection-user-ids "$RELEASE_IDS" \
   --tag-protection-bot-user-id "$BOT_ID" \
   --report ./mirror-batch-1.json \
-  --apply --max-projects 25
+  --apply --max-projects 25 \
+  --max-requests-per-minute 300
 ```
 
 The limit is required with `--apply` and must be between 1 and 25. It can also
 bound a read-only inspection. A project with the two release rules already in
 place can require 15 API requests to create the six remaining rules. A mirror
 missing all eight rules can require 19, so a batch of 25 can reach 475 requests
-plus the inventory pages. That is close to the 500-request-per-minute account
-quota, so operators should account for other activity and consider a smaller
-batch. The publisher applies the same rules for one project per publish and does
-not use this limit. GET requests retry a rate limit at most
+plus the inventory pages.
+
+The run paces every GitLab request to `--max-requests-per-minute`. This value
+defaults to 300 and must be between 1 and 450. Pacing covers inventory pages, GET
+retries, identity checks, creates, and readbacks. Request starts are spaced at
+least 60 divided by that value seconds apart, so a batch of 25 no longer bursts
+over the 500-request-per-minute account quota. The quota applies per token. Leave
+headroom for other users of the same token, and lower the value if other jobs
+run at the same time. A larger audit takes longer in proportion: minutes equal
+total requests divided by the rate. For example, 3,000 requests take about 10
+minutes at the default rate. A read-only audit of thousands of mirrors sends at
+least one request per mirror, so it takes several minutes even at the default.
+
+The publisher applies the same rules for one project per publish and does not use
+this limit. GET requests retry a rate limit at most
 twice, using a bounded delay. POST requests are deliberately not retried, even
 after a rate limit. Earlier creates in the batch may already have succeeded, and
 a transport failure can leave a write's outcome unknown. The run attempts a
