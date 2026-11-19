@@ -24,7 +24,7 @@ from taisce_cuan.source.pacing import RequestPacer
 
 logger = logging.getLogger(__name__)
 _MAX_PROJECTS = 25
-# 🛡️ Stay below GitLab's 500 requests per minute per token, which is shared.
+# 🛡️ The GitLab instance allows 500 requests per minute per token, so stay below.
 _MAX_REQUESTS_PER_MINUTE = 450
 _PYTHON_NAME = re.compile(r"pypi\.org-[a-z0-9][a-z0-9._-]*")
 # Exclusion reason for a direct pypi.org-* project whose path needs human review.
@@ -259,6 +259,9 @@ def reconcile_mirrors(
         "started_at_utc": datetime.now(UTC).isoformat(),
         "mirror_policy": mirror_policy if mirror_policy in MIRROR_POLICIES else None,
         "max_projects": max_projects if type(max_projects) is int else None,
+        "max_requests_per_minute": (
+            max_requests_per_minute if type(max_requests_per_minute) is int else None
+        ),
         "after_project_id": after_project_id if type(after_project_id) is int else None,
         "total_inventory": None,
         "inventory_complete": False,
@@ -288,7 +291,7 @@ def reconcile_mirrors(
         )
         report.update(forge_url=forge_url, group=group)
         headers = {"PRIVATE-TOKEN": auth_token}
-        # Every GitLab request, including retries and writes, shares one schedule.
+        # 📅 Every GitLab request, including retries and writes, shares one schedule.
         pacer = RequestPacer(max_requests_per_minute)
         with httpx.Client(
             timeout=15.0, verify=True, event_hooks={"request": [pacer]}

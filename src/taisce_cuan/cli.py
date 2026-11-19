@@ -264,7 +264,7 @@ def create_parser() -> argparse.ArgumentParser:
         type=int,
         default=300,
         help="Requests per minute cap for GitLab API calls, 1 to 450. "
-        "Leave headroom because the quota is shared per token.",
+        "Leave headroom: the GitLab instance allows 500 requests per minute per token.",
     )
 
     return parser
