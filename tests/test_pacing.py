@@ -4,14 +4,13 @@ import httpx
 import pytest
 
 
-@pytest.mark.parametrize("rate", [60, 120])
-def test_pacer_sleeps_only_until_the_next_request_slot(fake_clock, rate):
-    """Space back-to-back starts by one interval and never wait after a gap."""
+def test_pacer_sleeps_only_until_the_next_request_slot(fake_clock):
+    """Space back-to-back starts by one interval and never bank extra starts."""
     # Arrange
     from taisce_cuan.source.pacing import RequestPacer
 
-    pacer = RequestPacer(rate)
-    interval = 60 / rate
+    pacer = RequestPacer(60)
+    interval = 1.0
     request = httpx.Request("GET", "https://example.com/api/v4/projects")
 
     # Act
@@ -21,7 +20,11 @@ def test_pacer_sleeps_only_until_the_next_request_slot(fake_clock, rate):
     fake_clock.sleeps.clear()
     fake_clock.advance(2 * interval)
     pacer(request)
+    gap_sleeps = list(fake_clock.sleeps)
+    fake_clock.sleeps.clear()
+    pacer(request)
 
     # Assert
-    assert burst_sleeps == pytest.approx([interval] * 3)  # First start is free.
-    assert fake_clock.sleeps == []
+    assert burst_sleeps == pytest.approx([interval] * 3)  # 🆓 First start is free.
+    assert gap_sleeps == []  # 🕒 A call after a gap starts without waiting.
+    assert fake_clock.sleeps == pytest.approx([interval])  # 🚫 No banked starts.

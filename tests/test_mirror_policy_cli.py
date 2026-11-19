@@ -451,25 +451,17 @@ def test_reconcile_cli_paces_requests_with_flag_or_default(
         return client(*args, **kwargs)
 
     monkeypatch.setattr(httpx, "Client", factory)
+    _, argv = policy_route_args("reconcile-mirrors", tmp_path)
+    argv += [
+        "--mirror-policy",
+        "python-mirror",
+        "--tag-protection-user-ids",
+        CREATOR_IDS,
+        "--tag-protection-bot-user-id",
+        str(BOT_ID),
+    ]
     # Act
-    result = cli.main(
-        [
-            "reconcile-mirrors",
-            "--forge-url",
-            FORGE,
-            "--group",
-            GROUP,
-            "--mirror-policy",
-            "python-mirror",
-            "--tag-protection-user-ids",
-            CREATOR_IDS,
-            "--tag-protection-bot-user-id",
-            str(BOT_ID),
-            "--report",
-            str(tmp_path / "report.json"),
-            *extra_args,
-        ]
-    )
+    result = cli.main(argv + extra_args)
     # Assert
     assert result == 1 and len(requests) > 1
     assert fake_clock.now == pytest.approx((len(requests) - 1) * interval)
