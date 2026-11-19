@@ -3,8 +3,10 @@
 The `python-mirror` profile is an explicit opt-in for Python mirrors on the
 forge and group you configure (`--forge-url` and `--group`). Generic publishing
 does not enable it by default. The forge must be an HTTPS origin and the group a
-plain namespace. Bot and release grants come only from your configuration. Scratch
-environments must not enable the production profile.
+plain namespace. When a policy is selected, a forge URL without `gitlab` in it is
+refused, because the checks use the GitLab API. Bot and release grants come only
+from your configuration. Scratch environments must not enable the production
+profile.
 
 This repository is public, so it contains no user IDs, bot identities, or internal
 deployment paths. Supply them at run time, as shown below. Never commit them to the
@@ -80,8 +82,10 @@ Failure handling:
 
 - If listing tags fails, the project stops before the branch step and nothing is
   written.
-- If listing branches fails before any tag write, the error is recorded for that
-  project.
+- If a tag write fails, the project still gets its branch step: the branch rule is
+  created or checked. Then `apply_incomplete` is true, which stops an apply batch.
+- If listing branches fails before any tag write, the project's `before` snapshot
+  is null, the error is recorded for that project, and an apply batch stops.
 - If listing branches fails after tag rules were written, the run does not raise.
   The report keeps the created tag rules, the project is not ready, and
   `apply_incomplete` is true. That stops an apply batch.
@@ -110,11 +114,17 @@ so it uses the cursor:
    and the other flags from the commands above. Check that the report's
    `selected_ids` is exactly `[<project-id>]`. An archived, excluded, or mistyped
    ID silently selects the next mirror, so stop if the list differs.
-2. Repeat the same command with `--apply` and a new report path.
+2. Repeat the same command with `--apply` and a new report path. This also creates
+   any missing tag rules on that mirror, so pick a mirror whose tag rules are
+   already ready, or expect those writes.
 3. Read the project's protected branches with the GitLab API at
    `$FORGE_URL/api/v4/projects/<project-id>/protected_branches`. Check the grants
    in the table above.
-4. Have the pipeline bot push a commit that creates `verification-metadata` if it
+4. Confirm that this list includes rules inherited from the group, such as a
+   group-level wildcard rule. The evaluator treats every listed rule alike, so a
+   group rule that the list hides would go unseen. Stop if the list omits a group
+   rule that you know exists.
+5. Have the pipeline bot push a commit that creates `verification-metadata` if it
    is absent, then push one that fast-forwards it. Confirm that a force push and a
    push from another user are rejected.
 
@@ -274,8 +284,10 @@ a separate coordinated change:
 4. Run a complete read-only audit of the existing fleet and review every mirror
    with conflicting or unreviewed permissions. The profile requires exact
    creators, so a conflicting mirror fails real publishes once it is enabled.
-5. Apply the fleet reconciliation in bounded batches, and finish with a new uncapped
-   audit.
+5. Validate a provisioning canary through the publisher path in the pipeline. This
+   is separate from the `reconcile-mirrors` canary in
+   [Branch protection](#branch-protection). Then apply the fleet reconciliation in
+   bounded batches, and finish with a new uncapped audit.
 
 Do not expose a policy setting that the selected image silently ignores. This
 document does not claim deployment activation or fleet completion.

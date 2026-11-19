@@ -85,7 +85,9 @@ def reconcile_project_policy(
     """Inspect or apply the tag and branch rules without letting either block the other.
 
     Tag rules run first. A tag conflict never blocks the branch rule, and a branch
-    conflict never blocks tag rules. If the branch inventory fails before any branch
+    conflict never blocks tag rules. A failed tag write also does not skip the branch
+    step; the branch rule is created or checked, and apply_incomplete then stops the
+    batch. If the branch inventory fails before any branch
     write, the error is raised only when no tag write happened. After a tag write,
     the error is reported so the created audit trail survives.
 
