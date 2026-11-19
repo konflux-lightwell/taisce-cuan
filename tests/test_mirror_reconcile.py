@@ -369,6 +369,7 @@ def test_report_records_validated_target_and_utc_start(gitlab):
     # Assert
     report = audit(gitlab)
     assert result == 0 and report["forge_url"] == FORGE and report["group"] == GROUP
+    assert report["max_requests_per_minute"] == 300
     assert datetime.fromisoformat(report["started_at_utc"]).utcoffset() == timedelta(0)
 
 
