@@ -64,9 +64,6 @@ class FakeClock:
 def fake_clock(monkeypatch):
     """Replace ``time.monotonic`` and ``time.sleep`` with a deterministic clock.
 
-    Request this fixture after any fixture that patches ``time.sleep`` so this
-    clock wins.
-
     Returns:
         The fake clock controlling both functions.
     """
