@@ -53,6 +53,51 @@ def ready_rules():
     }
 
 
+BRANCH = "verification-metadata"
+MAINTAINER_ACCESS = [
+    {"access_level": 40, "user_id": None, "group_id": None, "deploy_key_id": None}
+]
+
+
+def user_access(user_ids):
+    """Build GitLab protected-branch entries for user-specific access."""
+    return [
+        {
+            "access_level": 40,
+            "user_id": user_id,
+            "group_id": None,
+            "deploy_key_id": None,
+        }
+        for user_id in user_ids
+    ]
+
+
+def branch_rule():
+    """Build the GitLab protected-branch readback the policy requires."""
+    return {
+        "name": BRANCH,
+        "push_access_levels": user_access([BOT_ID]),
+        "merge_access_levels": user_access([BOT_ID]),
+        "allow_force_push": False,
+        "unprotect_access_levels": MAINTAINER_ACCESS,
+    }
+
+
+def created_branch(payload):
+    """Store a protected branch the way GitLab reads back a creation payload."""
+    return {
+        **branch_rule(),
+        "name": payload["name"],
+        "push_access_levels": user_access(
+            [entry["user_id"] for entry in payload["allowed_to_push"]]
+        ),
+        "merge_access_levels": user_access(
+            [entry["user_id"] for entry in payload["allowed_to_merge"]]
+        ),
+        "allow_force_push": payload["allow_force_push"],
+    }
+
+
 @dataclass
 class GitLab:
     """Serve inventory pages and persist protected-tag changes in memory."""
@@ -68,6 +113,7 @@ class GitLab:
     live_projects: dict = field(default_factory=dict)
     live_responses: list = field(default_factory=list)
     fail_status: int = 503
+    branch_rules: dict = field(default_factory=dict)
 
     def respond(self, request):
         """Answer real HTTP requests without allowing external access."""
@@ -96,6 +142,8 @@ class GitLab:
         project_id = int(request.url.path.split("/")[-2])
         if project_id == self.fail_project:
             return httpx.Response(429, text=TOKEN)
+        if request.url.path.endswith("/protected_branches"):
+            return self.branch_response(request, project_id)
         rules = self.rules.setdefault(project_id, {})
         if request.method == "GET":
             return httpx.Response(
@@ -118,6 +166,18 @@ class GitLab:
             if "allowed_to_create" in payload
             else [{"access_level": payload["create_access_level"]}]
         )
+        return httpx.Response(201)
+
+    def branch_response(self, request, project_id):
+        """Serve protected-branch readback; a project starts with the required rule."""
+        branches = self.branch_rules.setdefault(project_id, {BRANCH: branch_rule()})
+        if request.method == "GET":
+            return httpx.Response(
+                200, json=list(branches.values()), headers={"X-Next-Page": ""}
+            )
+        self.snapshots.append(json.loads(self.report_path.read_text()))
+        payload = json.loads(request.content)
+        branches[payload["name"]] = created_branch(payload)
         return httpx.Response(201)
 
 
@@ -685,3 +745,61 @@ def test_inspect_records_failed_project_and_audits_the_rest(gitlab):
     assert report["projects"][1]["before"]["ready"]
     assert report["remaining_ids"] == [1] and not report["inspection_complete"]
     assert TOKEN not in json.dumps(report)
+
+
+@pytest.mark.xfail(
+    strict=True, raises=AssertionError, reason="branch rule is not provisioned yet"
+)
+def test_stale_tag_conflict_plus_branch_create_does_not_stop_batch(gitlab):
+    """A stale tag conflict must not stop the batch after a branch rule is created."""
+    # Arrange
+    gitlab.pages = [[project(1, "pypi.org-one"), project(2, "pypi.org-two")]]
+    gitlab.rules = {1: {"pnc/*": [{"access_level": 40}]}, 2: ready_rules()}
+    gitlab.branch_rules = {1: {}, 2: {}}
+
+    # Act
+    result = run(gitlab, apply=True, max_projects=2)
+
+    # Assert
+    report = audit(gitlab)
+    assert BRANCH in gitlab.branch_rules[1] and BRANCH in gitlab.branch_rules[2]
+    assert result == 1 and not report["fleet_ready"]
+    assert [p["id"] for p in report["projects"]] == [1, 2]
+    assert report["projects"][0]["after"]["branch_created"] == [BRANCH]
+    assert not report["projects"][0]["after"]["ready"]
+    assert report["projects"][1]["after"]["ready"]
+
+
+@pytest.mark.xfail(
+    strict=True, raises=AssertionError, reason="branch rule is not reported yet"
+)
+def test_report_records_branch_rules_and_fleet_readiness(gitlab, tmp_path):
+    """Audit a missing branch rule, apply it, then prove a fully ready fleet."""
+    # Arrange
+    gitlab.pages = [[project(1, "pypi.org-one")]]
+    gitlab.rules = {1: ready_rules()}
+    gitlab.branch_rules = {1: {}}
+
+    # Act: read-only audit
+    inspect_result = run(gitlab)
+
+    # Assert
+    inspect_report = audit(gitlab)
+    before = inspect_report["projects"][0]["before"]
+    assert [rule["state"] for rule in before.get("branch_rules", [])] == ["missing"]
+    assert inspect_result == 1 and not inspect_report["fleet_ready"]
+
+    # Act: capped apply writes a new report
+    gitlab.report_path = tmp_path / "apply.json"
+    run(gitlab, apply=True, max_projects=1)
+
+    # Assert
+    after = audit(gitlab)["projects"][0]["after"]
+    assert after.get("branch_created") == [BRANCH]
+
+    # Act: uncapped read-only audit of the now-ready fleet
+    gitlab.report_path = tmp_path / "final.json"
+    final_result = run(gitlab)
+
+    # Assert
+    assert final_result == 0 and audit(gitlab)["fleet_ready"]
