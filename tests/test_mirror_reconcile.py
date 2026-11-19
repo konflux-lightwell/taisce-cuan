@@ -780,7 +780,7 @@ def test_report_records_branch_rules_and_fleet_readiness(gitlab, tmp_path):
     # Assert
     inspect_report = audit(gitlab)
     before = inspect_report["projects"][0]["before"]
-    assert [rule["state"] for rule in before.get("branch_rules", [])] == ["missing"]
+    assert [rule["state"] for rule in before["branch_rules"]] == ["missing"]
     assert inspect_result == 1 and not inspect_report["fleet_ready"]
 
     # Act: capped apply writes a new report
@@ -789,7 +789,7 @@ def test_report_records_branch_rules_and_fleet_readiness(gitlab, tmp_path):
 
     # Assert
     after = audit(gitlab)["projects"][0]["after"]
-    assert after.get("branch_created") == [BRANCH]
+    assert after["branch_created"] == [BRANCH]
 
     # Act: uncapped read-only audit of the now-ready fleet
     gitlab.report_path = tmp_path / "final.json"

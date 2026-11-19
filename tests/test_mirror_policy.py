@@ -9,7 +9,15 @@ import httpx
 import pytest
 
 from taisce_cuan.source import GitMirrorPublisher
+from taisce_cuan.source.branch_policy import (
+    reconcile_branch_policy,
+    required_branch_rule,
+)
 from taisce_cuan.source.gitlab_api import MirrorPolicyError
+from taisce_cuan.source.project_policy import (
+    reconcile_project_policy,
+    required_project_policy,
+)
 
 FORGE = "https://gitlab.example.com"
 GROUP = "mirrors/python"
@@ -1155,15 +1163,6 @@ def policy_publisher():
     )
 
 
-def expect_error(action, error_type):
-    """Return the expected error, or fail with a plain AssertionError if none occurs."""
-    try:
-        action()
-    except error_type as error:
-        return error
-    raise AssertionError(f"Expected {error_type.__name__}")
-
-
 def publish_outcome(publisher, name):
     """Return the policy error text, or None when publication is allowed."""
     try:
@@ -1220,34 +1219,38 @@ def test_branch_rule_conflicts_are_reported_not_rewritten(mirror_server, rule):
     publisher = policy_publisher()
 
     # Act
-    error = expect_error(
-        lambda: publisher.ensure_remote_project(mirror_server.name), MirrorPolicyError
-    )
+    with pytest.raises(MirrorPolicyError, match="Protected branch policy differs"):
+        publisher.ensure_remote_project(mirror_server.name)
 
     # Assert
-    assert "Protected branch policy differs" in str(error)
     assert not branch_requests(mirror_server, "POST")
     assert mirror_server.branch_rules[BRANCH] == rule
 
 
 @pytest.mark.parametrize(
-    ("rule", "blocked"),
+    ("rule", "expected"),
     [
-        pytest.param(branch_rule("*", force=True), True, id="wildcard-force-push"),
+        pytest.param(
+            branch_rule("*", force=True),
+            "Mirror policy protection failed: Overlapping protected branch policy "
+            "'*' grants extra access for verification-metadata",
+            id="wildcard-force-push",
+        ),
         pytest.param(
             branch_rule("verification-*", push=MAINTAINER_ACCESS),
-            True,
+            "Mirror policy protection failed: Overlapping protected branch policy "
+            "'verification-*' grants extra access for verification-metadata",
             id="prefix-maintainer-push",
         ),
         pytest.param(
             branch_rule("main", push=DEPLOY_KEY_ACCESS),
-            False,
+            None,
             id="unrelated-deploy-key",
         ),
-        pytest.param(branch_rule("*"), False, id="wildcard-bot-only"),
+        pytest.param(branch_rule("*"), None, id="wildcard-bot-only"),
     ],
 )
-def test_overlapping_branch_rules(mirror_server, rule, blocked):
+def test_overlapping_branch_rules(mirror_server, rule, expected):
     """Block overlaps that grant extra access, and ignore or accept the rest."""
     # Arrange
     mirror_server.branch_rules[rule["name"]] = rule
@@ -1259,10 +1262,7 @@ def test_overlapping_branch_rules(mirror_server, rule, blocked):
     # Assert
     assert branch_requests(mirror_server, "GET")
     assert not branch_requests(mirror_server, "POST")
-    if blocked:
-        assert outcome is not None and "Overlapping protected branch policy" in outcome
-    else:
-        assert outcome is None
+    assert outcome == expected
 
 
 @pytest.mark.parametrize(
@@ -1282,6 +1282,12 @@ def test_overlapping_branch_rules(mirror_server, rule, blocked):
             id="readback-differs",
         ),
         pytest.param(
+            ("branch_post_status", 422),
+            "Protected branch policy was not verified for verification-metadata",
+            [],
+            id="post-422-not-created",
+        ),
+        pytest.param(
             ("branch_list_fails_after_post", True),
             "Protected branch policy readback failed",
             [BRANCH],
@@ -1291,11 +1297,6 @@ def test_overlapping_branch_rules(mirror_server, rule, blocked):
 )
 def test_branch_apply_failures_are_not_ready(mirror_server, setting, error, created):
     """Report a failed branch write or readback as not ready, keeping the audit."""
-    from taisce_cuan.source.branch_policy import (
-        reconcile_branch_policy,
-        required_branch_rule,
-    )
-
     # Arrange
     knob, value = setting
     setattr(mirror_server, knob, value)
@@ -1315,11 +1316,6 @@ def test_branch_apply_failures_are_not_ready(mirror_server, setting, error, crea
 
 def test_tag_conflict_does_not_block_branch_rule(mirror_server):
     """Create the branch rule while a stale tag conflict blocks tag writes."""
-    from taisce_cuan.source.project_policy import (
-        reconcile_project_policy,
-        required_project_policy,
-    )
-
     # Arrange
     mirror_server.rules["pnc/*"] = user_grants([RELEASE_ID])
     mirror_server.branch_rules.clear()
@@ -1342,11 +1338,6 @@ def test_tag_conflict_does_not_block_branch_rule(mirror_server):
 
 def test_branch_conflict_does_not_block_tag_rules(mirror_server):
     """Create missing tag rules while a conflicting branch rule stays untouched."""
-    from taisce_cuan.source.project_policy import (
-        reconcile_project_policy,
-        required_project_policy,
-    )
-
     # Arrange
     mirror_server.rules.clear()
     conflict = branch_rule(force=True)
@@ -1373,11 +1364,6 @@ def test_branch_conflict_does_not_block_tag_rules(mirror_server):
 
 def test_branch_list_failure_after_tag_writes_keeps_created_audit(mirror_server):
     """Keep the audit of tag rules created before a branch inventory failure."""
-    from taisce_cuan.source.project_policy import (
-        reconcile_project_policy,
-        required_project_policy,
-    )
-
     # Arrange
     mirror_server.rules.clear()
     mirror_server.branch_list_status = 500
@@ -1398,11 +1384,6 @@ def test_branch_list_failure_after_tag_writes_keeps_created_audit(mirror_server)
 
 def test_branch_list_failure_before_any_write_raises(mirror_server):
     """Raise without writing when the branch inventory fails before any tag write."""
-    from taisce_cuan.source.project_policy import (
-        reconcile_project_policy,
-        required_project_policy,
-    )
-
     # Arrange
     policy = required_project_policy(
         "python-mirror", FORGE, GROUP, RELEASE_CREATORS, BOT_ID
@@ -1413,14 +1394,10 @@ def test_branch_list_failure_before_any_write_raises(mirror_server):
     mirror_server.requests.clear()
 
     # Act
-    with httpx.Client() as client:
-        error = expect_error(
-            lambda: reconcile_project_policy(client, FORGE, 42, {}, policy, apply=True),
-            MirrorPolicyError,
-        )
+    with httpx.Client() as client, pytest.raises(MirrorPolicyError, match="HTTP 500"):
+        reconcile_project_policy(client, FORGE, 42, {}, policy, apply=True)
 
     # Assert
-    assert "HTTP 500" in str(error)
     assert not [
         request for request in mirror_server.requests if request.method == "POST"
     ]
