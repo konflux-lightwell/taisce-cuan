@@ -16,8 +16,6 @@ from taisce_cuan.source.mirror_policy import (
 )
 
 VERIFICATION_METADATA_BRANCH = "verification-metadata"
-# 🏷️ Label used in GitLab error text for push and merge access grants.
-_LABEL = "Protected branch access"
 _MAINTAINER_LEVEL = 40
 
 _Grants = set[tuple[str, int]]
@@ -78,9 +76,9 @@ def _parse_rule(entry: dict) -> _Parsed | None:
     try:
         return (
             force,
-            _grants(entry.get("push_access_levels"), _LABEL),
-            _grants(entry.get("merge_access_levels"), _LABEL),
-            _grants(entry.get("unprotect_access_levels"), _LABEL),
+            _grants(entry.get("push_access_levels")),
+            _grants(entry.get("merge_access_levels")),
+            _grants(entry.get("unprotect_access_levels")),
         )
     except MirrorPolicyError:
         return None

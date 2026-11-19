@@ -145,36 +145,23 @@ def _validated_project(
     return url, project_id
 
 
-def _grants(
-    entries: object, label: str = "Protected tag creator"
-) -> set[tuple[str, int]]:
-    """Parse GitLab grants without confusing user grants with roles.
-
-    Args:
-        entries: The raw access-level list from a GitLab protection rule.
-        label: Noun phrase used in error text, such as "Protected branch access".
-
-    Returns:
-        The normalized (kind, value) grants, where kind is user, group, or role.
-
-    Raises:
-        MirrorPolicyError: The list or an entry is malformed or unrecognized.
-    """
+def _grants(entries: object) -> set[tuple[str, int]]:
+    """Parse GitLab creator grants without confusing user grants with roles."""
     if not isinstance(entries, list):
-        raise MirrorPolicyError(f"{label} grants are malformed")
+        raise MirrorPolicyError("Protected tag creator grants are malformed")
     grants: set[tuple[str, int]] = set()
     for entry in entries:
         if not isinstance(entry, dict):
-            raise MirrorPolicyError(f"{label} grant is malformed")
+            raise MirrorPolicyError("Protected tag creator grant is malformed")
         if entry.get("deploy_key_id") is not None:
-            raise MirrorPolicyError(f"{label} grant is unrecognized")
+            raise MirrorPolicyError("Protected tag creator grant is unrecognized")
         user_id, group_id, level = (
             entry.get("user_id"),
             entry.get("group_id"),
             entry.get("access_level"),
         )
         if level is not None and (type(level) is not int or level not in _ROLE_LEVELS):
-            raise MirrorPolicyError(f"{label} grant is unrecognized")
+            raise MirrorPolicyError("Protected tag creator grant is unrecognized")
         if (
             user_id is not None
             and group_id is None
@@ -197,7 +184,7 @@ def _grants(
         ):
             grants.add(("role", level))
         else:
-            raise MirrorPolicyError(f"{label} grant is unrecognized")
+            raise MirrorPolicyError("Protected tag creator grant is unrecognized")
     return grants
 
 
