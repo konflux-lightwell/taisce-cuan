@@ -9,6 +9,15 @@ import httpx
 import pytest
 
 from taisce_cuan.source import GitMirrorPublisher
+from taisce_cuan.source.branch_policy import (
+    reconcile_branch_policy,
+    required_branch_rule,
+)
+from taisce_cuan.source.gitlab_api import MirrorPolicyError
+from taisce_cuan.source.project_policy import (
+    reconcile_project_policy,
+    required_project_policy,
+)
 
 FORGE = "https://gitlab.example.com"
 GROUP = "mirrors/python"
@@ -30,6 +39,52 @@ def user_grants(user_ids):
         {"access_level": 40, "user_id": user_id, "group_id": None}
         for user_id in user_ids
     ]
+
+
+BRANCH = "verification-metadata"
+MAINTAINER_ACCESS = [
+    {"access_level": 40, "user_id": None, "group_id": None, "deploy_key_id": None}
+]
+DEVELOPER_ACCESS = [
+    {"access_level": 30, "user_id": None, "group_id": None, "deploy_key_id": None}
+]
+DEPLOY_KEY_ACCESS = [{"deploy_key_id": 9, "access_level": 40}]
+
+
+def user_access(user_ids):
+    """Build GitLab protected-branch entries for user-specific access."""
+    return [
+        {
+            "access_level": 40,
+            "user_id": user_id,
+            "group_id": None,
+            "deploy_key_id": None,
+        }
+        for user_id in user_ids
+    ]
+
+
+def branch_rule(name=BRANCH, *, push=None, merge=None, force=False, unprotect=None):
+    """Build a GitLab protected-branch readback, defaulting to the required rule."""
+    return {
+        "name": name,
+        "push_access_levels": user_access([BOT_ID]) if push is None else push,
+        "merge_access_levels": user_access([BOT_ID]) if merge is None else merge,
+        "allow_force_push": force,
+        "unprotect_access_levels": MAINTAINER_ACCESS
+        if unprotect is None
+        else unprotect,
+    }
+
+
+def created_branch(payload):
+    """Store a protected branch the way GitLab reads back a creation payload."""
+    return branch_rule(
+        payload["name"],
+        push=user_access([entry["user_id"] for entry in payload["allowed_to_push"]]),
+        merge=user_access([entry["user_id"] for entry in payload["allowed_to_merge"]]),
+        force=payload["allow_force_push"],
+    )
 
 
 @dataclass
@@ -55,6 +110,11 @@ class MirrorServer:
     post_mismatch_for: str | None = None
     post_race_for: str | None = None
     post_also_creates: str | None = None
+    branch_rules: dict = field(default_factory=lambda: {BRANCH: branch_rule()})
+    branch_post_status: int | None = None
+    branch_post_mismatch: bool = False
+    branch_list_status: int | None = None
+    branch_list_fails_after_post: bool = False
 
     @property
     def project(self):
@@ -85,6 +145,8 @@ class MirrorServer:
             return httpx.Response(
                 self.create_status, json=self.create_override or self.project
             )
+        if path == "/api/v4/projects/42/protected_branches":
+            return self._branch_response(request)
         if path == "/api/v4/projects/42/protected_tags":
             if request.method == "GET":
                 return httpx.Response(
@@ -123,6 +185,32 @@ class MirrorServer:
             )
         return httpx.Response(404, json={"message": "unconfigured API request"})
 
+    def _branch_response(self, request):
+        """Serve protected-branch readback and one guarded creation per POST."""
+        if request.method == "GET":
+            posted = any(
+                prior.method == "POST"
+                and prior.url.path.endswith("/protected_branches")
+                for prior in self.requests
+            )
+            if self.branch_list_status is not None:
+                return httpx.Response(self.branch_list_status)
+            if self.branch_list_fails_after_post and posted:
+                return httpx.Response(500)
+            return httpx.Response(
+                200,
+                json=list(self.branch_rules.values()),
+                headers={"X-Next-Page": ""},
+            )
+        payload = json.loads(request.content)
+        if self.branch_post_status is not None:
+            return httpx.Response(self.branch_post_status)
+        stored = created_branch(payload)
+        if self.branch_post_mismatch:
+            stored["allow_force_push"] = True
+        self.branch_rules[payload["name"]] = stored
+        return httpx.Response(201, json=stored)
+
 
 @pytest.fixture
 def mirror_server(monkeypatch):
@@ -148,6 +236,7 @@ def test_required_policy_prepares_python_mirrors(mirror_server, exists, name):
     mirror_server.name = name
     if not exists:
         mirror_server.rules.clear()
+        mirror_server.branch_rules.clear()
     release_before = {key: value[:] for key, value in mirror_server.rules.items()}
     publisher = GitMirrorPublisher(
         auth_token="offline-test-token",
@@ -212,6 +301,7 @@ def test_required_policy_rejects_extra_creator_permissions(mirror_server, patter
         {"remote_url": "https://gitlab.example.com/another/project.git"},
         {"tag_protection_user_ids": []},
         {"tag_protection_user_ids": None},
+        {"forge_url": "https://git.example.com"},
     ],
 )
 def test_required_policy_cannot_fall_back_to_an_unchecked_target(
@@ -625,6 +715,17 @@ def test_policy_rejects_new_project_provisioning_errors(mirror_server, failure):
         ("sme-verified/*", [{"access_level": 20}]),
         ("pnc/*", [{"access_level": 40, "user_id": BOT_ID, "group_id": 77}]),
         ("pnc/*", [{"access_level": "unknown", "user_id": BOT_ID}]),
+        (
+            "sme-verified/*",
+            [
+                {
+                    "access_level": 30,
+                    "member_role_id": 7001,
+                    "user_id": None,
+                    "group_id": None,
+                }
+            ],
+        ),
     ],
 )
 def test_policy_rejects_divergent_or_malformed_grants(mirror_server, pattern, grants):
@@ -1006,3 +1107,297 @@ def test_policy_audit_identifies_expected_and_overlapping_grants(mirror_server):
         }
     ]
     assert any("constituent-pin/example" in error for error in report["errors"])
+
+
+CONFLICTING_BRANCH_RULES = [
+    pytest.param(
+        branch_rule(push=user_access([BOT_ID, RELEASE_ID])), id="extra-push-user"
+    ),
+    pytest.param(branch_rule(push=MAINTAINER_ACCESS), id="maintainer-push"),
+    pytest.param(branch_rule(merge=user_access([RELEASE_ID])), id="merge-differs"),
+    pytest.param(branch_rule(force=True), id="force-push-allowed"),
+    pytest.param(branch_rule(unprotect=DEVELOPER_ACCESS), id="developer-unprotect"),
+    pytest.param(
+        {
+            key: value
+            for key, value in branch_rule().items()
+            if key != "unprotect_access_levels"
+        },
+        id="unprotect-missing",
+    ),
+    pytest.param(branch_rule(push=DEPLOY_KEY_ACCESS), id="deploy-key-grant"),
+    pytest.param(
+        branch_rule(
+            unprotect=[
+                {
+                    "access_level": 40,
+                    "member_role_id": 7001,
+                    "user_id": None,
+                    "group_id": None,
+                }
+            ]
+        ),
+        id="custom-role-unprotect",
+    ),
+]
+
+
+def branch_requests(server, method):
+    """Return the protected-branch requests of one HTTP method seen by the fake."""
+    return [
+        request
+        for request in server.requests
+        if request.method == method and request.url.path.endswith("/protected_branches")
+    ]
+
+
+def policy_publisher():
+    """Build a publisher for the python-mirror policy with the fake's identities."""
+    return GitMirrorPublisher(
+        auth_token="offline-test-token",
+        forge_url=FORGE,
+        group=GROUP,
+        tag_protection_user_ids=RELEASE_CREATORS,
+        mirror_policy="python-mirror",
+        tag_protection_bot_user_id=BOT_ID,
+    )
+
+
+def publish_outcome(publisher, name):
+    """Return the policy error text, or None when publication is allowed."""
+    try:
+        publisher.ensure_remote_project(name)
+    except MirrorPolicyError as error:
+        return str(error)
+    return None
+
+
+@pytest.mark.parametrize("exists", [False, True], ids=["new", "existing"])
+def test_branch_rule_is_created_with_readback(mirror_server, exists):
+    """Create a missing verification-metadata rule once and accept its readback."""
+    # Arrange
+    mirror_server.exists = exists
+    mirror_server.branch_rules.clear()
+    publisher = policy_publisher()
+
+    # Act
+    url = publisher.ensure_remote_project(mirror_server.name)
+
+    # Assert
+    assert url == mirror_server.project["http_url_to_repo"]
+    posts = branch_requests(mirror_server, "POST")
+    assert [json.loads(post.content) for post in posts] == [
+        {
+            "name": BRANCH,
+            "allow_force_push": False,
+            "allowed_to_push": [{"user_id": BOT_ID}],
+            "allowed_to_merge": [{"user_id": BOT_ID}],
+        }
+    ]
+    assert mirror_server.branch_rules[BRANCH] == branch_rule()
+
+
+def test_correct_branch_rule_causes_no_branch_write(mirror_server):
+    """Read the correct branch rule and leave it untouched."""
+    # Arrange
+    publisher = policy_publisher()
+
+    # Act
+    publisher.ensure_remote_project(mirror_server.name)
+
+    # Assert
+    assert branch_requests(mirror_server, "GET")
+    assert not branch_requests(mirror_server, "POST")
+    assert mirror_server.branch_rules == {BRANCH: branch_rule()}
+
+
+@pytest.mark.parametrize("rule", CONFLICTING_BRANCH_RULES)
+def test_branch_rule_conflicts_are_reported_not_rewritten(mirror_server, rule):
+    """Refuse divergent branch protection and leave the stored rule unchanged."""
+    # Arrange
+    mirror_server.branch_rules[BRANCH] = rule
+    publisher = policy_publisher()
+
+    # Act
+    with pytest.raises(MirrorPolicyError, match="Protected branch policy differs"):
+        publisher.ensure_remote_project(mirror_server.name)
+
+    # Assert
+    assert not branch_requests(mirror_server, "POST")
+    assert mirror_server.branch_rules[BRANCH] == rule
+
+
+@pytest.mark.parametrize(
+    ("rule", "expected"),
+    [
+        pytest.param(
+            branch_rule("*", force=True),
+            "Mirror policy protection failed: Overlapping protected branch policy "
+            "'*' grants extra access for verification-metadata",
+            id="wildcard-force-push",
+        ),
+        pytest.param(
+            branch_rule("verification-*", push=MAINTAINER_ACCESS),
+            "Mirror policy protection failed: Overlapping protected branch policy "
+            "'verification-*' grants extra access for verification-metadata",
+            id="prefix-maintainer-push",
+        ),
+        pytest.param(
+            branch_rule("main", push=DEPLOY_KEY_ACCESS),
+            None,
+            id="unrelated-deploy-key",
+        ),
+        pytest.param(branch_rule("*"), None, id="wildcard-bot-only"),
+    ],
+)
+def test_overlapping_branch_rules(mirror_server, rule, expected):
+    """Block overlaps that grant extra access, and ignore or accept the rest."""
+    # Arrange
+    mirror_server.branch_rules[rule["name"]] = rule
+    publisher = policy_publisher()
+
+    # Act
+    outcome = publish_outcome(publisher, mirror_server.name)
+
+    # Assert
+    assert branch_requests(mirror_server, "GET")
+    assert not branch_requests(mirror_server, "POST")
+    assert outcome == expected
+
+
+@pytest.mark.parametrize(
+    ("setting", "error", "created"),
+    [
+        pytest.param(
+            ("branch_post_status", 500),
+            "Protected branch policy creation failed for verification-metadata: "
+            "HTTP 500",
+            [],
+            id="post-500",
+        ),
+        pytest.param(
+            ("branch_post_mismatch", True),
+            "Protected branch policy differs for verification-metadata",
+            [BRANCH],
+            id="readback-differs",
+        ),
+        pytest.param(
+            ("branch_post_status", 422),
+            "Protected branch policy was not verified for verification-metadata",
+            [],
+            id="post-422-not-created",
+        ),
+        pytest.param(
+            ("branch_list_fails_after_post", True),
+            "Protected branch policy readback failed",
+            [BRANCH],
+            id="readback-list-fails",
+        ),
+    ],
+)
+def test_branch_apply_failures_are_not_ready(mirror_server, setting, error, created):
+    """Report a failed branch write or readback as not ready, keeping the audit."""
+    # Arrange
+    knob, value = setting
+    setattr(mirror_server, knob, value)
+    mirror_server.branch_rules.clear()
+    rule = required_branch_rule(BOT_ID)
+
+    # Act
+    with httpx.Client() as client:
+        report = reconcile_branch_policy(client, FORGE, 42, {}, rule, apply=True)
+
+    # Assert
+    assert not report["ready"]
+    assert error in report["errors"]
+    assert report["created"] == created
+    assert len(branch_requests(mirror_server, "POST")) == 1
+
+
+def test_tag_conflict_does_not_block_branch_rule(mirror_server):
+    """Create the branch rule while a stale tag conflict blocks tag writes."""
+    # Arrange
+    mirror_server.rules["pnc/*"] = user_grants([RELEASE_ID])
+    mirror_server.branch_rules.clear()
+    tags_before = dict(mirror_server.rules)
+    policy = required_project_policy(
+        "python-mirror", FORGE, GROUP, RELEASE_CREATORS, BOT_ID
+    )
+
+    # Act
+    with httpx.Client() as client:
+        report = reconcile_project_policy(client, FORGE, 42, {}, policy, apply=True)
+
+    # Assert
+    assert report["branch_created"] == [BRANCH]
+    assert mirror_server.branch_rules[BRANCH] == branch_rule()
+    assert mirror_server.rules == tags_before
+    assert not report["ready"] and not report["apply_incomplete"]
+    assert any("pnc/*" in error for error in report["errors"])
+
+
+def test_branch_conflict_does_not_block_tag_rules(mirror_server):
+    """Create missing tag rules while a conflicting branch rule stays untouched."""
+    # Arrange
+    mirror_server.rules.clear()
+    conflict = branch_rule(force=True)
+    mirror_server.branch_rules[BRANCH] = conflict
+    policy = required_project_policy(
+        "python-mirror", FORGE, GROUP, RELEASE_CREATORS, BOT_ID
+    )
+    tag_names = {rule.name for rule in policy.tag_rules}
+
+    # Act
+    with httpx.Client() as client:
+        report = reconcile_project_policy(client, FORGE, 42, {}, policy, apply=True)
+
+    # Assert
+    assert set(report["created"]) == tag_names
+    assert set(mirror_server.rules) == tag_names
+    assert mirror_server.branch_rules[BRANCH] == conflict
+    assert (
+        "Protected branch policy differs for verification-metadata" in report["errors"]
+    )
+    assert not report["branch_created"] and not report["ready"]
+    assert not report["apply_incomplete"]
+
+
+def test_branch_list_failure_after_tag_writes_keeps_created_audit(mirror_server):
+    """Keep the audit of tag rules created before a branch inventory failure."""
+    # Arrange
+    mirror_server.rules.clear()
+    mirror_server.branch_list_status = 500
+    policy = required_project_policy(
+        "python-mirror", FORGE, GROUP, RELEASE_CREATORS, BOT_ID
+    )
+
+    # Act
+    with httpx.Client() as client:
+        report = reconcile_project_policy(client, FORGE, 42, {}, policy, apply=True)
+
+    # Assert
+    assert set(report["created"]) == {rule.name for rule in policy.tag_rules}
+    assert "GitLab GET request failed: HTTP 500" in report["errors"]
+    assert report["branch_rules"] == [] and not report["branch_created"]
+    assert not report["ready"] and report["apply_incomplete"]
+
+
+def test_branch_list_failure_before_any_write_raises(mirror_server):
+    """Raise without writing when the branch inventory fails before any tag write."""
+    # Arrange
+    policy = required_project_policy(
+        "python-mirror", FORGE, GROUP, RELEASE_CREATORS, BOT_ID
+    )
+    with httpx.Client() as client:
+        reconcile_project_policy(client, FORGE, 42, {}, policy, apply=True)
+    mirror_server.branch_list_status = 500
+    mirror_server.requests.clear()
+
+    # Act
+    with httpx.Client() as client, pytest.raises(MirrorPolicyError, match="HTTP 500"):
+        reconcile_project_policy(client, FORGE, 42, {}, policy, apply=True)
+
+    # Assert
+    assert not [
+        request for request in mirror_server.requests if request.method == "POST"
+    ]

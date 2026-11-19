@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from taisce_cuan.source.gitlab_api import MirrorPolicyError, gitlab_list
+from taisce_cuan.source.gitlab_api import MirrorPolicyError, gitlab_create, gitlab_list
 
 MIRROR_POLICIES = ("python-mirror",)
 _ROLE_LEVELS = {0, 5, 10, 15, 20, 30, 40, 50, 60}
@@ -153,7 +153,10 @@ def _grants(entries: object) -> set[tuple[str, int]]:
     for entry in entries:
         if not isinstance(entry, dict):
             raise MirrorPolicyError("Protected tag creator grant is malformed")
+        # 🚫 Deploy keys and custom roles look like plain roles without these checks.
         if entry.get("deploy_key_id") is not None:
+            raise MirrorPolicyError("Protected tag creator grant is unrecognized")
+        if entry.get("member_role_id") is not None:
             raise MirrorPolicyError("Protected tag creator grant is unrecognized")
         user_id, group_id, level = (
             entry.get("user_id"),
@@ -341,22 +344,17 @@ def reconcile_tag_policy(
             else:
                 payload["create_access_level"] = rule.access_level
             writes_attempted = True
-            # Never replay POST automatically, even after a rate limit. Earlier
-            # creates may have succeeded; readback and a fresh run inspect live state.
-            try:
-                response = client.post(
-                    url, headers=headers, json=payload, follow_redirects=False
-                )
-            except (httpx.HTTPError, httpx.InvalidURL):
-                errors.append(f"Protected tag policy creation failed for {rule.name}")
-                response = None
-            if response is not None and response.status_code in (200, 201):
+            was_created, error = gitlab_create(
+                client,
+                url,
+                headers,
+                payload,
+                f"Protected tag policy creation failed for {rule.name}",
+            )
+            if was_created:
                 created.append(rule.name)
-            elif response is not None and response.status_code not in (409, 422):
-                errors.append(
-                    f"Protected tag policy creation failed for {rule.name}: "
-                    f"HTTP {response.status_code}"
-                )
+            if error:
+                errors.append(error)
             try:
                 reports, remaining, readback_errors = _evaluate(
                     gitlab_list(client, url, headers), rules

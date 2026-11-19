@@ -96,3 +96,34 @@ def gitlab_list(
         elif next_page != str(page + 1):
             raise MirrorPolicyError("GitLab list returned invalid pagination")
     raise MirrorPolicyError("GitLab list exceeded the page limit")
+
+
+def gitlab_create(
+    client: httpx.Client, url: str, headers: dict, payload: dict, failure: str
+) -> tuple[bool, str | None]:
+    """POST one protection rule once and classify the response without retrying.
+
+    Args:
+        client: HTTP client for the GitLab API.
+        url: GitLab collection endpoint for the rule.
+        headers: API request headers.
+        payload: Rule body to create.
+        failure: Error text to report when the create cannot be confirmed.
+
+    Returns:
+        A tuple of (created, error). A 409 or 422 is neither, so the caller must
+        read back live state to decide.
+    """
+    # Never replay POST automatically, even after a rate limit. Earlier
+    # creates may have succeeded; readback and a fresh run inspect live state.
+    try:
+        response = client.post(
+            url, headers=headers, json=payload, follow_redirects=False
+        )
+    except (httpx.HTTPError, httpx.InvalidURL):
+        return False, failure
+    if response.status_code in (200, 201):
+        return True, None
+    if response.status_code in (409, 422):
+        return False, None
+    return False, f"{failure}: HTTP {response.status_code}"
