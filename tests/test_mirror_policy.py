@@ -706,6 +706,17 @@ def test_policy_rejects_new_project_provisioning_errors(mirror_server, failure):
         ("sme-verified/*", [{"access_level": 20}]),
         ("pnc/*", [{"access_level": 40, "user_id": BOT_ID, "group_id": 77}]),
         ("pnc/*", [{"access_level": "unknown", "user_id": BOT_ID}]),
+        (
+            "sme-verified/*",
+            [
+                {
+                    "access_level": 30,
+                    "member_role_id": 7001,
+                    "user_id": None,
+                    "group_id": None,
+                }
+            ],
+        ),
     ],
 )
 def test_policy_rejects_divergent_or_malformed_grants(mirror_server, pattern, grants):
@@ -1106,6 +1117,19 @@ CONFLICTING_BRANCH_RULES = [
         id="unprotect-missing",
     ),
     pytest.param(branch_rule(push=DEPLOY_KEY_ACCESS), id="deploy-key-grant"),
+    pytest.param(
+        branch_rule(
+            unprotect=[
+                {
+                    "access_level": 40,
+                    "member_role_id": 7001,
+                    "user_id": None,
+                    "group_id": None,
+                }
+            ]
+        ),
+        id="custom-role-unprotect",
+    ),
 ]
 
 

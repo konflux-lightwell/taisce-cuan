@@ -153,7 +153,10 @@ def _grants(entries: object) -> set[tuple[str, int]]:
     for entry in entries:
         if not isinstance(entry, dict):
             raise MirrorPolicyError("Protected tag creator grant is malformed")
+        # 🚫 Deploy keys and custom roles look like plain roles without these checks.
         if entry.get("deploy_key_id") is not None:
+            raise MirrorPolicyError("Protected tag creator grant is unrecognized")
+        if entry.get("member_role_id") is not None:
             raise MirrorPolicyError("Protected tag creator grant is unrecognized")
         user_id, group_id, level = (
             entry.get("user_id"),
