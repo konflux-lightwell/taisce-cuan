@@ -613,9 +613,8 @@ class GitMirrorPublisher:
             f"to {repo_name}"
         )
 
-        # 2. Git init if repo not present, configure forge auth, and fetch
-        # existing remote refs for the idempotency and branch-advance checks
-        # below.
+        # 2. Initialize Git and discover this version's remote refs. Only
+        # an existing canonical tag needs objects for the content checks.
         self._init_git_repo(repo_dir)
         self._configure_git_auth(repo_dir)
 
@@ -623,8 +622,11 @@ class GitMirrorPublisher:
             self.ensure_remote_project(repo_name) if not request.dry_run else None
         )
 
+        remote_refs: set[str] = set()
         if remote_url and not request.dry_run:
-            self._fetch_existing_remote_refs(repo_dir, remote_url)
+            remote_refs = self._fetch_existing_remote_refs(
+                repo_dir, remote_url, canonical, request.version
+            )
 
         # 3. Check existing tags and idempotency / overwrite protection
         existing_tags = self.get_existing_tags(repo_dir, canonical)
@@ -663,7 +665,11 @@ class GitMirrorPublisher:
 
         # 4. Check out the version-derived stream branch, refusing to advance one
         # that already exists during ingestion.
-        self._checkout_orphan_stream_branch(repo_dir, target_branch)
+        self._checkout_orphan_stream_branch(
+            repo_dir,
+            target_branch,
+            remote_exists=f"refs/heads/{target_branch}" in remote_refs,
+        )
 
         # 5. Extract source archive
         source_dir = repo_dir / "source"
@@ -724,7 +730,12 @@ class GitMirrorPublisher:
             f"\n\nsha256: {source_sha256}"
         )
         tags_to_push = self._commit_and_tag(
-            repo_dir, canonical, request.version, commit_msg, target_branch
+            repo_dir,
+            canonical,
+            request.version,
+            commit_msg,
+            target_branch,
+            baseline_exists=f"refs/tags/baseline/{request.version}" in remote_refs,
         )
 
         if request.dry_run or not remote_url:
@@ -808,41 +819,64 @@ class GitMirrorPublisher:
             ["git", "config", "http.extraHeader", header], cwd=repo_dir, check=True
         )
 
-    def _fetch_existing_remote_refs(self, repo_dir: Path, remote_url: str) -> None:
-        """Validate access to remote_url, then fetch its branches and tags
-        for the idempotency and branch-advance checks below."""
+    def _fetch_existing_remote_refs(
+        self, repo_dir: Path, remote_url: str, canonical: str, version: str
+    ) -> set[str]:
+        """Discover this version's refs and fetch only its canonical tag.
+
+        Branch and baseline existence checks need only ref names. Fetching all
+        refs would download every preserved source tree and archive, even for
+        a new version. A depth-one tag fetch retains the complete target tree
+        needed by the content checks without downloading its parent history.
+        """
+        tag_ref = f"refs/tags/{canonical}/{version}"
+        wanted = {
+            tag_ref,
+            f"refs/tags/baseline/{version}",
+            f"refs/heads/stream/{version}",
+        }
+        started = time.monotonic()
+        logger.info("Looking up existing mirror refs for %s/%s", canonical, version)
         ls_res = subprocess.run(
-            ["git", "ls-remote", remote_url],
+            ["git", "ls-remote", "--refs", remote_url, *sorted(wanted)],
             cwd=repo_dir,
             capture_output=True,
             text=True,
             check=False,
         )
         if ls_res.returncode != 0:
-            raise RuntimeError(
-                f"Could not access remote repository {remote_url}: "
-                f"{ls_res.stderr.strip()}"
+            raise RuntimeError("Could not access remote repository")
+        remote_refs = {
+            fields[1]
+            for line in ls_res.stdout.splitlines()
+            if len(fields := line.split()) == 2 and fields[1] in wanted
+        }
+        if tag_ref in remote_refs:
+            logger.info("Fetching existing version tag %s (depth 1)", tag_ref)
+            fetch_res = subprocess.run(
+                [
+                    "git",
+                    "fetch",
+                    "--force",
+                    "--no-tags",
+                    "--depth=1",
+                    remote_url,
+                    f"+{tag_ref}:{tag_ref}",
+                ],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=False,
             )
-
-        fetch_res = subprocess.run(
-            [
-                "git",
-                "fetch",
-                "--force",
-                "--tags",
-                remote_url,
-                "+refs/heads/*:refs/remotes/origin/*",
-            ],
-            cwd=repo_dir,
-            capture_output=True,
-            text=True,
-            check=False,
+            if fetch_res.returncode != 0:
+                raise RuntimeError(f"Could not fetch existing version tag {tag_ref}")
+        logger.info(
+            "Mirror ref lookup complete in %.1fs (%d refs; version tag %s)",
+            time.monotonic() - started,
+            len(remote_refs),
+            "fetched" if tag_ref in remote_refs else "absent; no fetch needed",
         )
-        if fetch_res.returncode != 0:
-            logger.info(
-                "Remote repository appears empty or has no matching refs; "
-                "initializing fresh tree"
-            )
+        return remote_refs
 
     def _check_git_source_idempotency(
         self, repo_dir: Path, canonical: str, tag_name: str, resolved_sha: str
@@ -879,7 +913,7 @@ class GitMirrorPublisher:
         )
 
     def _checkout_orphan_stream_branch(
-        self, repo_dir: Path, target_branch: str
+        self, repo_dir: Path, target_branch: str, *, remote_exists: bool = False
     ) -> None:
         """Refuse to advance a stream branch that already exists locally or
         on the remote; otherwise check out a clean orphan branch for it."""
@@ -909,7 +943,7 @@ class GitMirrorPublisher:
                 f"Stream branch {target_branch} already exists locally; "
                 f"refusing to advance."
             )
-        elif exists_remote:
+        elif remote_exists or exists_remote:
             raise ValueError(
                 f"Stream branch {target_branch} already exists; refusing to "
                 f"advance it during ingestion."
@@ -964,6 +998,8 @@ class GitMirrorPublisher:
         version: str,
         commit_msg: str,
         target_branch: str,
+        *,
+        baseline_exists: bool = False,
     ) -> list[str]:
         """Stage, commit, and tag <canonical>/<version> plus
         baseline/<version> (the latter only if not already present). Returns
@@ -990,7 +1026,7 @@ class GitMirrorPublisher:
         ).stdout.strip()
 
         tags_to_push = [tag_name]
-        if not existing_baseline:
+        if not baseline_exists and not existing_baseline:
             subprocess.run(["git", "tag", baseline_tag], cwd=repo_dir, check=True)
             logger.info(f"Tagged initial {baseline_tag} on branch {target_branch}")
             tags_to_push.append(baseline_tag)
@@ -1094,8 +1130,11 @@ class GitMirrorPublisher:
             remote_url = (
                 self.ensure_remote_project(repo_name) if not request.dry_run else None
             )
+            remote_refs: set[str] = set()
             if remote_url and not request.dry_run:
-                self._fetch_existing_remote_refs(repo_dir, remote_url)
+                remote_refs = self._fetch_existing_remote_refs(
+                    repo_dir, remote_url, canonical, request.version
+                )
 
             target_branch = f"stream/{request.version}"
 
@@ -1111,7 +1150,11 @@ class GitMirrorPublisher:
                     disposition="already-present",
                 )
 
-            self._checkout_orphan_stream_branch(repo_dir, target_branch)
+            self._checkout_orphan_stream_branch(
+                repo_dir,
+                target_branch,
+                remote_exists=f"refs/heads/{target_branch}" in remote_refs,
+            )
             self._write_git_source_tree(
                 repo_dir,
                 scratch_source_dir,
@@ -1126,7 +1169,12 @@ class GitMirrorPublisher:
                 f"({cloned.upstream_url})\n\ncommit: {cloned.resolved_sha}"
             )
             tags_to_push = self._commit_and_tag(
-                repo_dir, canonical, request.version, commit_msg, target_branch
+                repo_dir,
+                canonical,
+                request.version,
+                commit_msg,
+                target_branch,
+                baseline_exists=f"refs/tags/baseline/{request.version}" in remote_refs,
             )
 
             if request.dry_run or not remote_url:
