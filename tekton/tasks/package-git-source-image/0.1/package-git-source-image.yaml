@@ -7,6 +7,7 @@ metadata:
     app.kubernetes.io/name: package-git-source-image
     app.kubernetes.io/version: "0.1"
     app.kubernetes.io/part-of: lightwell
+    build.appstudio.redhat.com/build_type: python-git-ingest
 spec:
   description: |-
     Packages a fetched git source checkout (a Trusted Artifact, e.g. from fetch-git-source)
