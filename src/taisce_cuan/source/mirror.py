@@ -925,25 +925,12 @@ class GitMirrorPublisher:
             ).returncode
             == 0
         )
-        exists_remote = (
-            subprocess.run(
-                [
-                    "git",
-                    "rev-parse",
-                    "--verify",
-                    f"refs/remotes/origin/{target_branch}",
-                ],
-                cwd=repo_dir,
-                capture_output=True,
-            ).returncode
-            == 0
-        )
         if exists_local:
             raise ValueError(
                 f"Stream branch {target_branch} already exists locally; "
                 f"refusing to advance."
             )
-        elif remote_exists or exists_remote:
+        elif remote_exists:
             raise ValueError(
                 f"Stream branch {target_branch} already exists; refusing to "
                 f"advance it during ingestion."
