@@ -78,9 +78,20 @@ spec:
       type: string
       default: ""
     - name: tagProtectionUserIds
-      description: Comma-separated list of GitLab user IDs allowed to create protected tags (e.g. '11111,22222'). When empty, tag protection is skipped.
+      description: Comma-separated list of GitLab user IDs allowed to create release tags (baseline/*, novel-head/*) on the mirror (e.g. '11111,22222'). When empty and no mirrorPolicy is set, tag protection is skipped.
       type: string
       default: ""
+    - name: mirrorPolicy
+      description: >-
+        Mirror policy profile to enforce on the target mirror (LWLP-5235);
+        currently 'python-mirror'. The enforced tag patterns are defined by
+        the profile in taisce-cuan (see docs/mirror-policy.md), not by this
+        task. Required together with tagProtectionUserIds and
+        mirrorPolicyBotUserId.
+      type: string
+    - name: mirrorPolicyBotUserId
+      description: GitLab user ID of the pipeline bot that is the sole allowed creator of the policy's pin and verification tags (constituent-pin/* etc.). Required together with mirrorPolicy.
+      type: string
     - name: sourceType
       description: canonical_source.type for this package version — pypi-sdist or git
       type: string
@@ -222,6 +233,8 @@ spec:
         - --provenance-path=$(params.provenancePath)
         - --rhtl-predicate-type=$(params.rhtlPredicateType)
         - --tag-protection-user-ids=$(params.tagProtectionUserIds)
+        - --mirror-policy=$(params.mirrorPolicy)
+        - --tag-protection-bot-user-id=$(params.mirrorPolicyBotUserId)
         - --workspace-dir=$(params.dataDir)/work
         - --source-type=$(params.sourceType)
         - --upstream-url=$(params.upstreamUrl)
