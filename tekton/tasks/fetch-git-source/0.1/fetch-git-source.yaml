@@ -68,7 +68,7 @@ spec:
         readOnly: true
   steps:
     - name: fetch-git-source
-      image: quay.io/light-factory/taisce-cuan:latest@sha256:6913a6bacc4bef442aa97bc50e90a61c6d942e3a985a8bdd962f56a33ec29556
+      image: quay.io/light-factory/taisce-cuan:latest@sha256:82c5fcb318d01747635b6f43f012be6d1f6cd84a471419e68d74c09469ac779d
       computeResources:
         limits:
           memory: 4Gi
